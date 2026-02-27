@@ -1,3 +1,4 @@
+/* Default image styles (no coastline underlay) */
 .MMM-Globe-image {
 	-webkit-clip-path: circle(50% at 50% 50%);
 	clip-path: circle(50% at 50% 50%);
@@ -5,4 +6,36 @@
 .MMM-Globe-image-centralAmericaDiscNat {
 	-webkit-clip-path: circle(44% at 50% 50%);
 	clip-path: circle(44% at 50% 50%);
+}
+
+/* Container for satellite image + coastline underlay stack */
+.MMM-Globe-container {
+	position: relative;
+	display: inline-block;
+}
+
+/* Coastline underlay: visible only where satellite image is dark (night side) */
+.MMM-Globe-coastlines {
+	position: absolute;
+	top: 0;
+	left: 0;
+	-webkit-clip-path: circle(50% at 50% 50%);
+	clip-path: circle(50% at 50% 50%);
+	opacity: 0.3;
+	transform: scale(0.98);
+	transform-origin: center center;
+}
+
+/* Satellite image with blend mode (used when coastlines are active) */
+.MMM-Globe-image-blended {
+	position: relative;
+	-webkit-clip-path: circle(50% at 50% 50%);
+	clip-path: circle(50% at 50% 50%);
+	mix-blend-mode: lighten;
+}
+.MMM-Globe-image-centralAmericaDiscNat-blended {
+	position: relative;
+	-webkit-clip-path: circle(44% at 50% 50%);
+	clip-path: circle(44% at 50% 50%);
+	mix-blend-mode: lighten;
 }
