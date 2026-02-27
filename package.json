@@ -1,19 +1,19 @@
 {
   "name": "mmm-globe",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "MagicMirror module for displaying satellite imagery from various geostationary satellites",
+  "main": "MMM-Globe.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LukeSkywalker92/MMM-Globe.git"
+    "url": "git+https://github.com/rkorell/MMM-Globe.git"
   },
-  "author": "Luke Scheffler",
+  "author": "Luke Scheffler (original), Dr. Ralf Korell (fork maintainer)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/LukeSkywalker92/MMM-Globe/issues"
+    "url": "https://github.com/rkorell/MMM-Globe/issues"
   },
-  "homepage": "https://github.com/LukeSkywalker92/MMM-Globe#readme"
+  "homepage": "https://github.com/rkorell/MMM-Globe#readme"
 }
