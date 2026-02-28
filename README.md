@@ -16,7 +16,7 @@ EUMETSAT migrated to a new dynamic platform at `view.eumetsat.int`, but this is 
 
 Additionally, the **CIRA SLIDER** service operated by [NOAA/RAMMB](https://rammb2.cira.colostate.edu/) at Colorado State University provides Meteosat full-disk imagery as PNG tiles, including the excellent **GeoColor** product — natural color during the day and city lights on a Blue Marble background at night. This makes for a particularly stunning globe display around sunrise and sunset.
 
-This fork adds both options, plus a coastline/border overlay, image saving, and several bugfixes.
+This fork adds both options, plus a coastline/border overlay, image saving, configurable logging, and numerous bugfixes. The architecture has been completely refactored in v3.0.0: all image fetching now runs server-side in the node_helper, the frontend is a pure display layer, and all styles share a single download pipeline.
 
 ## Installation
 
@@ -38,7 +38,8 @@ Add the following to your `config.js`:
         style: "meteosat",       // see Available Styles below
         imageSize: 600,
         coastlines: "europe",    // optional: "europe", "americas", "asia"
-        enableImageSaving: false
+        enableImageSaving: false,
+        logLevel: "ERROR"        // "ERROR", "WARN", "INFO", "DEBUG"
     }
 },
 ```
@@ -51,9 +52,10 @@ Add the following to your `config.js`:
 | `imageSize` | Size of the displayed image in pixels.<br>**Type:** `integer` **Default:** `600` |
 | `updateInterval` | How often the image is refreshed (in milliseconds). Not used for `meteosat` (which auto-polls every 60s and only updates when a new image is available).<br>**Default:** `10 * 60 * 1000` (10 minutes) |
 | `ownImagePath` | URL to a custom image. Overrides `style` when set. Works with any image URL, including EUMETSAT WMS (see [below](#using-eumetsat-wms)).<br>**Default:** `""` |
-| `retryDelay` | Delay before retrying after a failed image load (milliseconds).<br>**Default:** `30000` (30 seconds) |
-| `enableImageSaving` | Save each satellite image to the `images/` subfolder. For the `meteosat` style, files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`); for other styles, files are named with the local download time. Duplicate timestamps are automatically skipped.<br>**Type:** `boolean` **Default:** `false` |
+| `retryDelay` | Delay before retrying after a failed SLIDER API poll (milliseconds). For non-SLIDER styles, retries happen automatically at the next `updateInterval`.<br>**Default:** `30000` (30 seconds) |
+| `enableImageSaving` | Save each satellite image to the `images/` subfolder. For the `meteosat` style, files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`) and duplicates are skipped automatically. For other styles, files are named with the local download time and duplicate images are detected via content hash (identical images are not saved again).<br>**Type:** `boolean` **Default:** `false` |
 | `coastlines` | Show a coastline and country border underlay beneath the satellite image. The underlay is subtle (semi-transparent white lines on black) and only visible where the satellite image is dark (night side), thanks to CSS `mix-blend-mode: lighten`. Choose the projection matching your satellite view.<br>**Values:** `false` (off), `"europe"` (0° longitude), `"americas"` (-75.2° longitude), `"asia"` (140.7° longitude)<br>**Default:** `false` |
+| `logLevel` | Controls logging verbosity in pm2 logs. `"ERROR"`: only errors. `"WARN"`: adds warnings (e.g., failed fetches). `"INFO"`: adds new images and saves. `"DEBUG"`: adds poll activity, startup details, and duplicate detection.<br>**Values:** `"ERROR"`, `"WARN"`, `"INFO"`, `"DEBUG"` **Default:** `"ERROR"` |
 
 ### Available styles
 
@@ -79,7 +81,8 @@ config: {
     ownImagePath: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.1.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&srs=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",
     imageSize: 600,
     updateInterval: 15 * 60 * 1000,
-    coastlines: "europe"
+    coastlines: "europe",
+    logLevel: "INFO"             // see new images in pm2 logs
 }
 ```
 
@@ -109,23 +112,33 @@ The coastline data comes from Natural Earth (`ne_10m_coastline` + `ne_boundary_l
 
 ## Architecture
 
-All image fetching runs in `node_helper.js` (server-side) for consistent logging in pm2 and to avoid CORS issues:
+The module uses a clean backend/frontend separation. The frontend knows nothing about remote URLs, polling, or image saving — it only displays what the backend provides.
 
-- **`meteosat` style:** Polls the CIRA SLIDER API every 60 seconds. Compares the latest timestamp with the previously known one and only sends a new image URL to the frontend when the timestamp changes. This ensures every new image is captured without wasteful re-downloads.
-- **All other styles + `ownImagePath`:** Sends the image URL to the frontend at each `updateInterval` with a cache-busting parameter to ensure fresh content.
-- **Image saving:** When `enableImageSaving` is `true`, the node_helper downloads and saves each image to the `images/` subfolder.
+**Backend (`node_helper.js`)** — all image fetching runs server-side for consistent logging in pm2 and to avoid CORS issues. Three methods with clear responsibilities:
 
-The frontend (`MMM-Globe.js`) only handles display: it receives image URLs from the backend, loads them into `<img>` elements, and renders them with CSS circle clipping.
+- **`pollSlider`** (meteosat style): Polls the CIRA SLIDER API every 60 seconds, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. On error or timeout, retries after `retryDelay`.
+- **`pollStatic`** (all other styles + `ownImagePath`): Triggers a download at each `updateInterval`. Covers all built-in styles (geoColor, natColor, airMass, fullBand, europeDisc*, centralAmericaDiscNat) as well as custom URLs via `ownImagePath`.
+- **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for meteosat and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains.
+
+**Frontend (`MMM-Globe.js`)** — pure display layer. Receives a local image path from the backend, loads it into an `<img>` element, and renders it with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten`.
 
 ## What changed compared to the original?
 
-### New features
+### v3.0.0 — Architecture refactoring (Feb 2026)
+
+Complete refactoring of the module's internal architecture. The frontend and backend responsibilities are now cleanly separated:
+
+- **Single download pipeline**: All image fetching consolidated into one shared `downloadAndServe()` method used by both SLIDER and static polling. Previously, different styles used different fetch paths with duplicated logic, and some paths downloaded images twice (once for display, once for saving).
+- **Frontend is display-only**: The frontend (`MMM-Globe.js`) no longer fetches images, manages URLs, or knows about `enableImageSaving`. It receives a local file path from the backend and displays it. All polling, downloading, saving, and error handling runs in the backend (`node_helper.js`).
+- **HTTP timeouts**: All HTTP requests now have timeouts (15s for API calls, 30s for image downloads). Previously, a stalled HTTP connection could block the entire polling chain indefinitely.
+- **Configurable logging** (`logLevel`): Four levels (ERROR, WARN, INFO, DEBUG) with an unconditional startup message. Default is ERROR (silent operation). All logging happens in the backend (visible in pm2 logs), not in the Electron browser console.
+- **Coastline/border underlay**: Configurable `coastlines` option with three pre-rendered overlays (europe, americas, asia) in the correct geostationary projection for each satellite view.
+
+### v2.0.0 — New features (Feb 2026)
 
 - **Meteosat via CIRA SLIDER** (`style: "meteosat"`): Full-disk GeoColor imagery of Europe/Africa with day/night visualization
 - **EUMETSAT WMS support**: Use `ownImagePath` with WMS GetMap URLs in geostationary projection
-- **Coastline/border underlay**: Optional overlay of coastlines and country borders (`coastlines` option)
 - **Image saving for all styles**: `enableImageSaving` works for all styles, not just meteosat
-- **Backend fetching with logging**: All image fetching moved to node_helper for pm2-visible logging
 - **Smart SLIDER polling**: Polls every 60s but only downloads when a genuinely new image is available
 
 ### Bugfixes from the original module
@@ -134,7 +147,12 @@ The frontend (`MMM-Globe.js`) only handles display: it receives image URLs from 
 - **Mixed content (HTTP → HTTPS):** All RAMMB image URLs updated from `http://` to `https://`.
 - **Loose equality operators:** All `==` / `!=` replaced with strict `===` / `!==`.
 - **Cache-buster for URLs with query string:** The original appended `?timestamp` as a cache-buster, which broke URLs that already contain a `?` (such as WMS URLs). Now correctly uses `&` when a query string is already present.
-- **Startup reliability:** Image loading moved from `getDom()` to `start()` with automatic retry, so the globe appears even when the network isn't ready at boot time.
+- **Startup reliability:** Image loading moved out of `getDom()` into the backend polling loop with automatic retry on failure, so the globe appears even when the network isn't ready at boot time.
+- **Double image downloads:** When `enableImageSaving` was enabled, images were downloaded twice — once for display, once for saving. Now a single download serves both purposes.
+- **No HTTP timeouts:** The original had no timeouts on HTTP requests. A stalled connection (e.g., unresponsive image server) would silently stop all polling. Now enforced at 15s/30s.
+- **`loadImage` as global function:** The original's `loadImage()` function was defined in the global scope, risking name collisions with other modules. Now scoped as `_loadImage()` inside the module.
+- **`europeDiscNat` height hack:** Removed a hard-coded height adjustment in `getDom()` that was specific to the discontinued `europeDiscNat` style's non-square image format.
+- **Silent frontend failures:** Image load errors in the frontend were swallowed silently. Now logged via `Log.warn()`.
 
 ### Housekeeping
 

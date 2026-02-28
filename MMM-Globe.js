@@ -8,15 +8,6 @@
  * MIT Licensed.
  */
 
-// Promise based image loader with error handling
-const loadImage = src =>
-  new Promise(resolve => {
-    const image = new Image();
-    image.onload = () => resolve({ image, isError: false });
-    image.onerror = () => resolve({ image, isError: true });
-    image.src = src;
-  });
-
 Module.register("MMM-Globe", {
   defaults: {
     style: "geoColor",
@@ -25,7 +16,8 @@ Module.register("MMM-Globe", {
     updateInterval: 10 * 60 * 1000,  // 10 minutes
     retryDelay: 30 * 1000,           // retry delay on load failure (30 seconds)
     enableImageSaving: false,         // save satellite images locally (images/ subfolder)
-    coastlines: false                 // false, "europe", "americas", "asia"
+    coastlines: false,                // false, "europe", "americas", "asia"
+    logLevel: "ERROR"                 // "ERROR", "WARN", "INFO", "DEBUG"
   },
 
   start: function() {
@@ -38,7 +30,8 @@ Module.register("MMM-Globe", {
       ownImagePath: this.config.ownImagePath,
       updateInterval: this.config.updateInterval,
       retryDelay: this.config.retryDelay,
-      enableImageSaving: this.config.enableImageSaving
+      enableImageSaving: this.config.enableImageSaving,
+      logLevel: this.config.logLevel
     });
   },
 
@@ -46,13 +39,25 @@ Module.register("MMM-Globe", {
   socketNotificationReceived: function(notification, payload) {
     if (notification === "IMAGE_READY") {
       var self = this;
-      loadImage(payload.url).then(function(result) {
+      this._loadImage(payload.url).then(function(result) {
         if (!result.isError) {
           self.loadedImage = result.image;
           self.updateDom(1000);
+        } else {
+          Log.warn("MMM-Globe: Failed to load image from " + payload.url);
         }
       });
     }
+  },
+
+  // Promise based image loader with error handling (module-scoped to avoid global conflicts)
+  _loadImage: function(src) {
+    return new Promise(function(resolve) {
+      var image = new Image();
+      image.onload = function() { resolve({ image: image, isError: false }); };
+      image.onerror = function() { resolve({ image: image, isError: true }); };
+      image.src = src;
+    });
   },
 
   getStyles: function() {
@@ -63,11 +68,6 @@ Module.register("MMM-Globe", {
     var wrapper = document.createElement("div");
 
     if (this.loadedImage) {
-      if (this.config.style === "europeDiscNat") {
-        wrapper.style.height = 0.98 * this.config.imageSize - 1 + "px";
-        wrapper.style.overflow = "hidden";
-      }
-
       var useCoastlines = this.config.coastlines &&
         ["europe", "americas", "asia"].indexOf(this.config.coastlines) !== -1;
 
