@@ -83,6 +83,14 @@ module.exports = NodeHelper.create({
   socketNotificationReceived: function(notification, payload) {
     if (notification === "START_POLL") {
       if (this.polling) {
+        // Already polling — re-serve current.png if it exists (e.g. after browser refresh)
+        var currentFile = path.join(this.ensureImagesDir(), "current.png");
+        if (fs.existsSync(currentFile)) {
+          this.log("INFO", "Re-serving current.png after frontend reconnect");
+          this.sendSocketNotification("IMAGE_READY", {
+            url: "/modules/MMM-Globe/images/current.png?t=" + Date.now()
+          });
+        }
         return;
       }
       this.polling = true;
