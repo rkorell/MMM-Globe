@@ -3,8 +3,9 @@
  * a local file path and handles display.
  *
  * Two polling modes:
- * - pollSlider (style: "meteosat"): polls CIRA SLIDER API every 60s,
- *   detects new images by comparing timestamps.
+ * - pollSlider (SLIDER styles: geoColorEurope/USA/Pacific/Asia, alias "meteosat"):
+ *   polls CIRA SLIDER API every 60s, detects new images by comparing timestamps.
+ *   Supports four satellites: Meteosat-0deg, GOES-19, GOES-18, Himawari.
  * - pollStatic (all other styles + ownImagePath): polls at configured
  *   updateInterval.
  *
@@ -20,7 +21,14 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
-const SLIDER_TIMES_URL = "https://slider.cira.colostate.edu/data/json/meteosat-0deg/full_disk/geocolor/latest_times.json";
+const SLIDER_BASE_URL = "https://slider.cira.colostate.edu";
+const SLIDER_PRODUCT = "full_disk/geocolor";
+const SLIDER_SATELLITES = {
+  geoColorEurope:  "meteosat-0deg",
+  geoColorUSA:     "goes-19",
+  geoColorPacific: "goes-18",
+  geoColorAsia:    "himawari"
+};
 const SLIDER_POLL_INTERVAL = 60 * 1000;
 const HTTP_TIMEOUT = 15 * 1000;       // timeout for JSON/small requests
 const HTTP_TIMEOUT_IMAGE = 30 * 1000; // timeout for image downloads
@@ -54,6 +62,7 @@ module.exports = NodeHelper.create({
   polling: false,
   config: null,
   staticUrl: null,
+  sliderSatPath: null,
   logLevel: 0,
   imagesDir: null,
 
@@ -83,14 +92,6 @@ module.exports = NodeHelper.create({
   socketNotificationReceived: function(notification, payload) {
     if (notification === "START_POLL") {
       if (this.polling) {
-        // Already polling — re-serve current.png if it exists (e.g. after browser refresh)
-        var currentFile = path.join(this.ensureImagesDir(), "current.png");
-        if (fs.existsSync(currentFile)) {
-          this.log("INFO", "Re-serving current.png after frontend reconnect");
-          this.sendSocketNotification("IMAGE_READY", {
-            url: "/modules/MMM-Globe/images/current.png?t=" + Date.now()
-          });
-        }
         return;
       }
       this.polling = true;
@@ -103,14 +104,22 @@ module.exports = NodeHelper.create({
 
   setupAndPoll: function() {
     var config = this.config;
-    var mode = config.style === "meteosat" ? "SLIDER" : (config.ownImagePath ? "ownImagePath" : config.style);
-    console.log("Started (mode: " + mode + ", logLevel: " + config.logLevel + ")");
 
-    if (config.style === "meteosat") {
+    // Backwards compatibility: "meteosat" is an alias for "geoColorEurope"
+    var style = config.style === "meteosat" ? "geoColorEurope" : config.style;
+
+    // SLIDER styles: all geoColor* satellites
+    var satPath = SLIDER_SATELLITES[style];
+    if (satPath) {
+      this.sliderSatPath = satPath;
+      console.log("Started (mode: SLIDER/" + satPath + ", logLevel: " + config.logLevel + ")");
       this.log("DEBUG", "SLIDER poll interval: " + (SLIDER_POLL_INTERVAL / 1000) + "s");
       this.pollSlider();
       return;
     }
+
+    var mode = config.ownImagePath ? "ownImagePath" : config.style;
+    console.log("Started (mode: " + mode + ", logLevel: " + config.logLevel + ")");
 
     // Determine static URL for all non-SLIDER styles
     if (config.ownImagePath) {
@@ -125,12 +134,15 @@ module.exports = NodeHelper.create({
     this.pollStatic();
   },
 
-  // --- SLIDER (meteosat) polling ---
+  // --- SLIDER polling (geoColorEurope/USA/Pacific/Asia) ---
   // Polls latest_times.json every 60s, detects new images by timestamp comparison.
 
   pollSlider: function() {
     var self = this;
-    var req = https.get(SLIDER_TIMES_URL, function(res) {
+    var satPath = this.sliderSatPath;
+    var timesUrl = SLIDER_BASE_URL + "/data/json/" + satPath + "/" + SLIDER_PRODUCT + "/latest_times.json";
+
+    var req = https.get(timesUrl, function(res) {
       var data = "";
       res.on("data", function(chunk) { data += chunk; });
       res.on("end", function() {
@@ -147,8 +159,8 @@ module.exports = NodeHelper.create({
 
             self.lastTimestamp = ts;
             var dateStr = ts.substring(0, 4) + "/" + ts.substring(4, 6) + "/" + ts.substring(6, 8);
-            var imageUrl = "https://slider.cira.colostate.edu/data/imagery/"
-              + dateStr + "/meteosat-0deg---full_disk/geocolor/" + ts + "/00/000_000.png";
+            var imageUrl = SLIDER_BASE_URL + "/data/imagery/"
+              + dateStr + "/" + satPath + "---" + SLIDER_PRODUCT + "/" + ts + "/00/000_000.png";
 
             self.log("INFO", "New SLIDER image: " + ts);
             self.downloadAndServe(imageUrl, "globe_" + ts + ".png");

@@ -20,6 +20,9 @@ Module.register("MMM-Globe", {
     logLevel: "ERROR"                 // "ERROR", "WARN", "INFO", "DEBUG"
   },
 
+  // SLIDER style names (must match keys in node_helper SLIDER_SATELLITES + alias)
+  SLIDER_STYLES: ["geoColorEurope", "geoColorUSA", "geoColorPacific", "geoColorAsia", "meteosat"],
+
   start: function() {
     this.loadedImage = null;
 
@@ -32,6 +35,16 @@ Module.register("MMM-Globe", {
       retryDelay: this.config.retryDelay,
       enableImageSaving: this.config.enableImageSaving,
       logLevel: this.config.logLevel
+    });
+
+    // Self-recovery: load current.png immediately if it exists (e.g. after browser refresh)
+    var self = this;
+    var currentUrl = "/modules/MMM-Globe/images/current.png?t=" + Date.now();
+    this._loadImage(currentUrl).then(function(result) {
+      if (!result.isError && !self.loadedImage) {
+        self.loadedImage = result.image;
+        self.updateDom(1000);
+      }
     });
   },
 
@@ -68,7 +81,9 @@ Module.register("MMM-Globe", {
     var wrapper = document.createElement("div");
 
     if (this.loadedImage) {
-      var useCoastlines = this.config.coastlines &&
+      // Coastlines only for static styles — SLIDER images have natural coastlines
+      var isSliderStyle = this.SLIDER_STYLES.indexOf(this.config.style) !== -1;
+      var useCoastlines = !isSliderStyle && this.config.coastlines &&
         ["europe", "americas", "asia"].indexOf(this.config.coastlines) !== -1;
 
       if (useCoastlines) {

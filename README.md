@@ -8,6 +8,12 @@ A module for [MagicMirror²](https://github.com/MagicMirrorOrg/MagicMirror) that
 
 ![](https://github.com/rkorell/MMM-Globe/blob/master/screenshot.png?raw=true)
 
+**Four SLIDER perspectives** — GeoColor imagery from four geostationary satellites, each with day/night visualization and city lights:
+
+![](https://github.com/rkorell/MMM-Globe/blob/master/four_perspectives.jpg?raw=true)
+
+*From left to right: GOES-19 (Americas), Meteosat (Europe/Africa), GOES-18 (Pacific), Himawari (Asia/Australia)*
+
 ## Background: Why this fork?
 
 The original MMM-Globe module has been unmaintained since 2021 but worked perfectly fine for years — until February 2026, when EUMETSAT discontinued their static image server at `eumetview.eumetsat.int`. This broke the European satellite styles (`europeDiscNat`, `europeDiscSnow`) that many European MagicMirror users relied on.
@@ -35,13 +41,20 @@ Add the following to your `config.js`:
     module: "MMM-Globe",
     position: "lower_third",
     config: {
-        style: "meteosat",       // see Available Styles below
+        style: "geoColorEurope", // see Available Styles below
         imageSize: 600,
-        coastlines: "europe",    // optional: "europe", "americas", "asia"
         enableImageSaving: false,
         logLevel: "ERROR"        // "ERROR", "WARN", "INFO", "DEBUG"
     }
 },
+```
+
+For the Americas view with night city lights:
+```js
+config: {
+    style: "geoColorUSA",
+    imageSize: 600
+}
 ```
 
 ### Options
@@ -54,14 +67,27 @@ Add the following to your `config.js`:
 | `ownImagePath` | URL to a custom image. Overrides `style` when set. Works with any image URL, including EUMETSAT WMS (see [below](#using-eumetsat-wms)).<br>**Default:** `""` |
 | `retryDelay` | Delay before retrying after a failed SLIDER API poll (milliseconds). For non-SLIDER styles, retries happen automatically at the next `updateInterval`.<br>**Default:** `30000` (30 seconds) |
 | `enableImageSaving` | Save each satellite image to the `images/` subfolder. For the `meteosat` style, files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`) and duplicates are skipped automatically. For other styles, files are named with the local download time and duplicate images are detected via content hash (identical images are not saved again).<br>**Type:** `boolean` **Default:** `false` |
-| `coastlines` | Show a coastline and country border underlay beneath the satellite image. The underlay is subtle (semi-transparent white lines on black) and only visible where the satellite image is dark (night side), thanks to CSS `mix-blend-mode: lighten`. Choose the projection matching your satellite view.<br>**Values:** `false` (off), `"europe"` (0° longitude), `"americas"` (-75.2° longitude), `"asia"` (140.7° longitude)<br>**Default:** `false` |
+| `coastlines` | Show a coastline and country border underlay beneath the satellite image. **Only applies to static styles** — SLIDER styles (geoColor*) already have natural coastlines in the GeoColor imagery. The underlay is subtle (semi-transparent white lines on black) and only visible where the satellite image is dark (night side), thanks to CSS `mix-blend-mode: lighten`. Choose the projection matching your satellite view.<br>**Values:** `false` (off), `"europe"` (0° longitude), `"americas"` (-75.2° longitude), `"asia"` (140.7° longitude)<br>**Default:** `false` |
 | `logLevel` | Controls logging verbosity in pm2 logs. `"ERROR"`: only errors. `"WARN"`: adds warnings (e.g., failed fetches). `"INFO"`: adds new images and saves. `"DEBUG"`: adds poll activity, startup details, and duplicate detection.<br>**Values:** `"ERROR"`, `"WARN"`, `"INFO"`, `"DEBUG"` **Default:** `"ERROR"` |
 
 ### Available styles
 
+#### SLIDER styles (GeoColor with day/night visualization and city lights)
+
+These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and auto-poll every 60 seconds. They only download when a new image is available (typically every 10-15 minutes depending on the satellite).
+
+| Style | Satellite | Region | Status |
+|-------|-----------|--------|--------|
+| `geoColorEurope` | Meteosat (0°) | Europe / Africa | **Active** |
+| `geoColorUSA` | GOES-19 (75.2°W) | North / South America | **Active** |
+| `geoColorPacific` | GOES-18 (137.0°W) | Pacific / West Americas | **Active** |
+| `geoColorAsia` | Himawari (140.7°E) | Asia / Australia | **Active** |
+| `meteosat` | *(alias for `geoColorEurope`)* | | **Active** |
+
+#### Static styles (polled at `updateInterval`)
+
 | Style | Satellite | Region | Source | Status |
 |-------|-----------|--------|--------|--------|
-| `meteosat` | Meteosat (0°) | Europe / Africa | [CIRA SLIDER](https://slider.cira.colostate.edu) | **Active** (auto-polls every 60s) |
 | `geoColor` | Himawari-8 | Asia / Pacific | [RAMMB](http://rammb.cira.colostate.edu/ramsdis/online/himawari-8.asp) | Active |
 | `natColor` | Himawari-8 | Asia / Pacific | RAMMB | Active |
 | `airMass` | Himawari-8 | Asia / Pacific | RAMMB | Active |
@@ -70,7 +96,7 @@ Add the following to your `config.js`:
 | `europeDiscNat` | Meteosat MSG | Europe / Africa | EUMETSAT | **Discontinued** (Feb 2026) |
 | `europeDiscSnow` | Meteosat MSG | Europe / Africa | EUMETSAT | **Discontinued** (Feb 2026) |
 
-**Note:** If you were using `europeDiscNat` or `europeDiscSnow`, switch to `meteosat` — it provides the same Meteosat satellite view of Europe and Africa, with the bonus of a beautiful nighttime visualization.
+**Note:** If you were using `europeDiscNat` or `europeDiscSnow`, switch to `geoColorEurope` — it provides the same Meteosat satellite view of Europe and Africa, with the bonus of a beautiful nighttime visualization. The old `meteosat` style name still works as an alias.
 
 ### Using EUMETSAT WMS
 
@@ -100,6 +126,8 @@ The `msg_fes` layers update every 15 minutes, `mtg_fd` layers every 10 minutes. 
 
 ### Coastline underlay
 
+**Note:** Coastlines are only applied for static styles. SLIDER styles (`geoColorEurope`, `geoColorUSA`, etc.) already include natural coastlines in their GeoColor imagery — the overlay is automatically suppressed.
+
 The `coastlines` option adds a subtle underlay of coastlines and country borders beneath the satellite image. Three pre-rendered PNG overlays (1200×1200, downscaled for thinner lines) are included, each in the correct geostationary projection:
 
 - `"europe"` — centered at 0° longitude (Meteosat perspective)
@@ -116,13 +144,20 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 
 **Backend (`node_helper.js`)** — all image fetching runs server-side for consistent logging in pm2 and to avoid CORS issues. Three methods with clear responsibilities:
 
-- **`pollSlider`** (meteosat style): Polls the CIRA SLIDER API every 60 seconds, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. On error or timeout, retries after `retryDelay`.
+- **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API every 60 seconds for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. On error or timeout, retries after `retryDelay`.
 - **`pollStatic`** (all other styles + `ownImagePath`): Triggers a download at each `updateInterval`. Covers all built-in styles (geoColor, natColor, airMass, fullBand, europeDisc*, centralAmericaDiscNat) as well as custom URLs via `ownImagePath`.
 - **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for meteosat and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains.
 
-**Frontend (`MMM-Globe.js`)** — pure display layer. Receives a local image path from the backend, loads it into an `<img>` element, and renders it with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten`.
+**Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` (static styles only — SLIDER styles have natural coastlines).
 
 ## What changed compared to the original?
+
+### v3.1.0 — Multi-satellite SLIDER support (Mar 2026)
+
+- **Four SLIDER perspectives**: GeoColor imagery from four geostationary satellites — `geoColorEurope` (Meteosat), `geoColorUSA` (GOES-19), `geoColorPacific` (GOES-18), `geoColorAsia` (Himawari). All provide the same beautiful day/night visualization with city lights.
+- **Backwards compatible**: The old `meteosat` style name continues to work as an alias for `geoColorEurope`.
+- **Frontend self-recovery**: The frontend now loads `current.png` immediately on start, providing instant display after browser refresh without waiting for the next backend poll cycle.
+- **Coastlines for static styles only**: The `coastlines` overlay is automatically suppressed for SLIDER styles, which already have natural coastlines in the GeoColor imagery.
 
 ### v3.0.0 — Architecture refactoring (Feb 2026)
 
@@ -164,11 +199,22 @@ Complete refactoring of the module's internal architecture. The frontend and bac
 
 ### CIRA SLIDER API
 
-1. Query `https://slider.cira.colostate.edu/data/json/meteosat-0deg/full_disk/geocolor/latest_times.json` for available timestamps
-2. Take the most recent timestamp (e.g., `20260227123000`)
-3. Construct the tile URL: `https://slider.cira.colostate.edu/data/imagery/2026/02/27/meteosat-0deg---full_disk/geocolor/20260227123000/00/000_000.png`
+The module polls the SLIDER API for four geostationary satellites:
 
-Zoom level `00` returns the full disk as a single 464×464 PNG tile — perfect for MMM-Globe's CSS circle clipping.
+| Style | Satellite path | Coverage |
+|-------|---------------|----------|
+| `geoColorEurope` | `meteosat-0deg` | Europe / Africa |
+| `geoColorUSA` | `goes-19` | Americas |
+| `geoColorPacific` | `goes-18` | Pacific |
+| `geoColorAsia` | `himawari` | Asia / Australia |
+
+The polling mechanism is identical for all satellites:
+
+1. Query `https://slider.cira.colostate.edu/data/json/{sat}/full_disk/geocolor/latest_times.json` for available timestamps
+2. Take the most recent timestamp (e.g., `20260227123000`)
+3. Construct the tile URL: `https://slider.cira.colostate.edu/data/imagery/2026/02/27/{sat}---full_disk/geocolor/20260227123000/00/000_000.png`
+
+Zoom level `00` returns the full disk as a single 464×464 PNG tile — perfect for MMM-Globe's CSS circle clipping. All four satellites provide the GeoColor product with natural daytime colors and city lights on a Blue Marble background at night.
 
 ### EUMETSAT WMS
 
