@@ -34,3 +34,15 @@
 	clip-path: circle(44% at 50% 50%);
 	mix-blend-mode: lighten;
 }
+
+/* Black overlay to hide EUMETSAT footer at bottom of satellite images */
+.MMM-Globe-container::after {
+	content: '';
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	width: 100%;
+	height: 25px;
+	background: black;
+	pointer-events: none;
+}

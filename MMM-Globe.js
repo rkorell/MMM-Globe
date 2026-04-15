@@ -117,7 +117,10 @@ Module.register("MMM-Globe", {
         }
         image.width = this.config.imageSize.toString();
         image.height = this.config.imageSize.toString();
-        wrapper.appendChild(image);
+        var container = document.createElement("div");
+        container.className = "MMM-Globe-container";
+        container.appendChild(image);
+        wrapper.appendChild(container);
       }
     }
 
