@@ -1,0 +1,3 @@
+# Optional: only required for dot marker on stale fallback images
+# Pre-installed on Raspberry Pi OS
+Pillow>=10.0

@@ -35,6 +35,13 @@
 	mix-blend-mode: lighten;
 }
 
+/* Text label for stale fallback mode */
+.MMM-Globe-fallback-text {
+	text-align: center;
+	font-size: 12px;
+	margin-top: 4px;
+}
+
 /* Black overlay to hide EUMETSAT footer at bottom of satellite images */
 .MMM-Globe-container::after {
 	content: '';

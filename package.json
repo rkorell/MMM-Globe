@@ -1,6 +1,6 @@
 {
   "name": "mmm-globe",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "MagicMirror module for displaying satellite imagery from various geostationary satellites",
   "main": "MMM-Globe.js",
   "scripts": {

@@ -7,3 +7,10 @@
 
 # Saved satellite images
 /images/
+
+# Static fallback images (user-provided, only example committed)
+/static/*.jpg
+!/static/1200.jpg
+
+# Analysis documents
+status_meteosat.md

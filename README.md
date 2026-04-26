@@ -28,10 +28,18 @@ This fork adds both options, plus a coastline/border overlay, image saving, conf
 
 Navigate into your MagicMirror's `modules` folder and execute:
 ```bash
+cd ~/MagicMirror/modules
 git clone https://github.com/rkorell/MMM-Globe.git
 ```
 
-No additional dependencies are needed — the module uses only Node.js built-in modules.
+No npm dependencies are needed — the module uses only Node.js built-in modules.
+
+**Optional:** The dot marker for the [static fallback](#static-fallback-for-stale-images) feature requires Python 3 with Pillow. Pillow is pre-installed on Raspberry Pi OS. On other systems:
+```bash
+cd MMM-Globe
+pip install -r requirements.txt
+```
+Text markers and all other features work without Pillow.
 
 ## Configuration
 
@@ -69,6 +77,8 @@ config: {
 | `enableImageSaving` | Save each satellite image to the `images/` subfolder. For the `meteosat` style, files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`) and duplicates are skipped automatically. For other styles, files are named with the local download time and duplicate images are detected via content hash (identical images are not saved again).<br>**Type:** `boolean` **Default:** `false` |
 | `coastlines` | Show a coastline and country border underlay beneath the satellite image. **Only applies to static styles** — SLIDER styles (geoColor*) already have natural coastlines in the GeoColor imagery. The underlay is subtle (semi-transparent white lines on black) and only visible where the satellite image is dark (night side), thanks to CSS `mix-blend-mode: lighten`. Choose the projection matching your satellite view.<br>**Values:** `false` (off), `"europe"` (0° longitude), `"americas"` (-75.2° longitude), `"asia"` (140.7° longitude)<br>**Default:** `false` |
 | `logLevel` | Controls logging verbosity in pm2 logs. `"ERROR"`: only errors. `"WARN"`: adds warnings (e.g., failed fetches). `"INFO"`: adds new images and saves. `"DEBUG"`: adds poll activity, startup details, and duplicate detection.<br>**Values:** `"ERROR"`, `"WARN"`, `"INFO"`, `"DEBUG"` **Default:** `"ERROR"` |
+| `switchToStaticIfStale` | When `true`, automatically switches to pre-rendered static fallback images if the live satellite feed has not updated for 90 minutes. Only applies to static styles (`europeDiscNat`, `ownImagePath`, etc.), not SLIDER styles. See [Static Fallback for Stale Images](#static-fallback-for-stale-images) below.<br>**Type:** `boolean` **Default:** `false` |
+| `staleFallbackMarker` | Visual marker to indicate archive mode on fallback images. Three formats:<br>• `"off"` — no marker<br>• `"X:Y"` or `"X:Y:Px"` or `"X:Y:Px:Color"` — draws a dot at pixel position X,Y with optional size (default 4px) and color (default `cornflowerblue`). Rendered server-side via Python/Pillow. Example: `"330:75:4:cornflowerblue"` places a subtle dot on Germany.<br>• Any other text (e.g. `"Archivbild"`) — displays the text as a small label below the globe. Rendered as a DOM element, no additional dependencies needed.<br>**Default:** `"330:75:4:cornflowerblue"` |
 
 ### Available styles
 
@@ -93,10 +103,10 @@ These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and au
 | `airMass` | Himawari-8 | Asia / Pacific | RAMMB | Active |
 | `fullBand` | Himawari-8 | Asia / Pacific | RAMMB | Active |
 | `centralAmericaDiscNat` | GOES-16 | Americas | [NOAA STAR](https://www.star.nesdis.noaa.gov/GOES/) | Active |
-| `europeDiscNat` | Meteosat MSG | Europe / Africa | EUMETSAT | **Discontinued** (Feb 2026) |
-| `europeDiscSnow` | Meteosat MSG | Europe / Africa | EUMETSAT | **Discontinued** (Feb 2026) |
+| `europeDiscNat` | Meteosat MSG | Europe / Africa | EUMETSAT | **Unreliable** — was offline Feb 2026, back online Apr 2026, but subject to extended outages without notice. Use `switchToStaticIfStale: true` for resilience. |
+| `europeDiscSnow` | Meteosat MSG | Europe / Africa | EUMETSAT | **Unreliable** — same as `europeDiscNat` |
 
-**Note:** If you were using `europeDiscNat` or `europeDiscSnow`, switch to `geoColorEurope` — it provides the same Meteosat satellite view of Europe and Africa, with the bonus of a beautiful nighttime visualization. The old `meteosat` style name still works as an alias.
+**Note:** If you were using `europeDiscNat` or `europeDiscSnow`, consider switching to `geoColorEurope` — it provides the same Meteosat satellite view of Europe and Africa, with the bonus of a beautiful nighttime visualization. The old `meteosat` style name still works as an alias. If you prefer to keep `europeDiscNat` (which is back online as of April 2026 but unreliable), enable `switchToStaticIfStale: true` to automatically fall back to archive images during EUMETSAT outages.
 
 ### Using EUMETSAT WMS
 
@@ -138,6 +148,48 @@ The underlay uses CSS `mix-blend-mode: lighten`, which means the coastlines are 
 
 The coastline data comes from Natural Earth (`ne_10m_coastline` + `ne_boundary_lines_land`) via the EUMETSAT WMS background layers.
 
+### Static Fallback for Stale Images
+
+EUMETSAT's data processing pipeline occasionally experiences extended outages (e.g., April 2026: >30 hours of stale imagery). During such events, the module would display the same frozen satellite image for hours or even days. The static fallback feature addresses this by automatically switching to pre-rendered archive images that match the current time of day.
+
+**How it works:**
+
+1. On each poll, the module checks the `Last-Modified` HTTP header of the downloaded image
+2. If the image is older than 90 minutes, it is considered stale
+3. The module selects a matching static fallback image from the `static/` subfolder based on the current UTC time
+4. An optional visual marker (configurable dot or text) is drawn on the fallback image to indicate archive mode
+5. When the live feed recovers (fresh image detected), the module automatically switches back to live operation
+
+**Preparing static fallback images:**
+
+The `static/` subfolder should contain pre-rendered satellite images with coastline overlay, named by UTC time: `0000.jpg`, `0015.jpg`, ..., `2345.jpg` (15-minute intervals recommended, but any subset works). One example image (`1200.jpg`) is included in the repository. To create a full set:
+
+1. Enable `enableImageSaving: true` in your config and let the module collect images over a full day
+2. Use a tool like Python/Pillow to merge each saved image with the matching coastline overlay (the `coastlines_europe.png` file included in the module)
+3. Name the merged images as `HHMM.jpg` (UTC time) and place them in the `static/` subfolder
+
+The module scans the `static/` folder at startup and selects the image closest to the current UTC time. If only one image is present, it will be used regardless of the time.
+
+**Fallback marker configuration examples:**
+
+```js
+// Subtle blue dot on Germany (default)
+staleFallbackMarker: "330:75:4:cornflowerblue"
+
+// Larger red dot on Italy
+staleFallbackMarker: "340:130:8:red"
+
+// Text label "archive" in bottom-right corner
+staleFallbackMarker: "archive"
+
+// No marker
+staleFallbackMarker: "off"
+```
+
+**Note:** The dot marker is drawn directly onto the image by the backend using Python/Pillow for pixel-perfect positioning. Text markers are rendered as DOM elements by the frontend and require no additional dependencies. Both marker types disappear automatically when the live feed recovers.
+
+**Dependencies:** The dot marker format (`"X:Y:Px:Color"`) requires Python 3 with Pillow (`python3-pil` or `pip install Pillow`). Pillow is pre-installed on Raspberry Pi OS. Text markers and the stale detection itself have no additional dependencies.
+
 ## Architecture
 
 The module uses a clean backend/frontend separation. The frontend knows nothing about remote URLs, polling, or image saving — it only displays what the backend provides.
@@ -146,11 +198,20 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 
 - **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API every 60 seconds for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. On error or timeout, retries after `retryDelay`.
 - **`pollStatic`** (all other styles + `ownImagePath`): Triggers a download at each `updateInterval`. Covers all built-in styles (geoColor, natColor, airMass, fullBand, europeDisc*, centralAmericaDiscNat) as well as custom URLs via `ownImagePath`.
-- **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for meteosat and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains.
+- **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for meteosat and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains. For static styles with `switchToStaticIfStale` enabled, the `Last-Modified` HTTP header is checked before processing — if the image is older than 90 minutes, `serveStaticFallback` is called instead.
+- **`serveStaticFallback`** (stale image handler): Selects a time-appropriate image from the `static/` subfolder, optionally draws a dot marker via Python/Pillow subprocess, writes it to `current.png`, and sends it to the frontend with a `fallbackText` field for text markers. Called automatically when the live feed is detected as stale.
 
 **Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` (static styles only — SLIDER styles have natural coastlines).
 
 ## What changed compared to the original?
+
+### v3.2.0 — Static fallback for stale images (Apr 2026)
+
+- **Automatic stale detection**: When the live satellite feed has not updated for 90 minutes (checked via `Last-Modified` HTTP header), the module automatically switches to pre-rendered static fallback images from the `static/` subfolder. Works with `europeDiscNat`, `ownImagePath`, and other static styles.
+- **Time-matched fallback images**: Fallback images are named by UTC time (`HHMM.jpg`) and the module selects the one closest to the current time, so the displayed globe always shows a realistic day/night pattern.
+- **Configurable visual marker**: A small dot (rendered server-side via Python/Pillow) or text label (rendered as DOM element) can indicate archive mode. Dot markers offer pixel-perfect positioning on the globe image; text markers appear below the globe and require no additional dependencies.
+- **Automatic recovery**: When the live feed returns (fresh `Last-Modified` detected), the module seamlessly switches back to live operation.
+- **EUMETSAT status update**: `europeDiscNat` and `europeDiscSnow` are back online as of April 2026 but remain unreliable — subject to extended outages without notice. The static fallback feature provides resilience for users of these styles.
 
 ### v3.1.0 — Multi-satellite SLIDER support (Mar 2026)
 
