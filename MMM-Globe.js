@@ -19,7 +19,10 @@ Module.register("MMM-Globe", {
     coastlines: false,                // false, "europe", "americas", "asia"
     logLevel: "ERROR",                  // "ERROR", "WARN", "INFO", "DEBUG"
     switchToStaticIfStale: false,      // true: show static fallback images when live feed is stale (>90min unchanged)
-    staleFallbackMarker: "330:75:4:cornflowerblue"  // "off", "X:Y:Px:Color" for dot, or any text for label
+    staleFallbackMarker: "330:75:4:cornflowerblue",  // "off", "X:Y:Px:Color" for dot, or any text for label
+    archiveSunPhase: "",               // "HHMM:HHMM" sunrise:sunset UTC of archive images, e.g. "0730:1830"
+    lat: 50.24127,                     // Mirror location latitude (for seasonal sun phase mapping)
+    lon: 6.6174403                     // Mirror location longitude
   },
 
   // SLIDER style names (must match keys in node_helper SLIDER_SATELLITES + alias)
@@ -39,7 +42,10 @@ Module.register("MMM-Globe", {
       enableImageSaving: this.config.enableImageSaving,
       logLevel: this.config.logLevel,
       switchToStaticIfStale: this.config.switchToStaticIfStale,
-      staleFallbackMarker: this.config.staleFallbackMarker
+      staleFallbackMarker: this.config.staleFallbackMarker,
+      archiveSunPhase: this.config.archiveSunPhase,
+      lat: this.config.lat,
+      lon: this.config.lon
     });
 
     // Self-recovery: load current.png immediately if it exists (e.g. after browser refresh)

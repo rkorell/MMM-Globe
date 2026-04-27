@@ -65,6 +65,29 @@ config: {
 }
 ```
 
+Full configuration with all options:
+```js
+{
+    module: "MMM-Globe",
+    position: "lower_third",
+    config: {
+        style: "europeDiscNat",           // satellite image style (see Available Styles)
+        imageSize: 600,                   // display size in pixels
+        updateInterval: 10 * 60 * 1000,   // poll interval for static styles (10 min)
+        retryDelay: 30 * 1000,            // retry delay on failed SLIDER poll (30s)
+        ownImagePath: "",                 // custom image URL (overrides style)
+        enableImageSaving: false,         // save images to images/ subfolder
+        coastlines: "europe",             // coastline overlay: false, "europe", "americas", "asia"
+        logLevel: "ERROR",                // "ERROR", "WARN", "INFO", "DEBUG"
+        switchToStaticIfStale: true,      // show archive images when live feed is stale (>90min)
+        staleFallbackMarker: "330:75:4:cornflowerblue",  // "off", "X:Y:Px:Color", or text label
+        archiveSunPhase: "0730:1830",     // sunrise:sunset UTC of archive images (seasonal adjust)
+        lat: 50.24127,                    // mirror location latitude (for seasonal adjustment)
+        lon: 6.6174403                    // mirror location longitude
+    }
+},
+```
+
 ### Options
 
 | Option | Description |
@@ -79,6 +102,9 @@ config: {
 | `logLevel` | Controls logging verbosity in pm2 logs. `"ERROR"`: only errors. `"WARN"`: adds warnings (e.g., failed fetches). `"INFO"`: adds new images and saves. `"DEBUG"`: adds poll activity, startup details, and duplicate detection.<br>**Values:** `"ERROR"`, `"WARN"`, `"INFO"`, `"DEBUG"` **Default:** `"ERROR"` |
 | `switchToStaticIfStale` | When `true`, automatically switches to pre-rendered static fallback images if the live satellite feed has not updated for 90 minutes. Only applies to static styles (`europeDiscNat`, `ownImagePath`, etc.), not SLIDER styles. See [Static Fallback for Stale Images](#static-fallback-for-stale-images) below.<br>**Type:** `boolean` **Default:** `false` |
 | `staleFallbackMarker` | Visual marker to indicate archive mode on fallback images. Three formats:<br>• `"off"` — no marker<br>• `"X:Y"` or `"X:Y:Px"` or `"X:Y:Px:Color"` — draws a dot at pixel position X,Y with optional size (default 4px) and color (default `cornflowerblue`). Rendered server-side via Python/Pillow. Example: `"330:75:4:cornflowerblue"` places a subtle dot on Germany.<br>• Any other text (e.g. `"Archivbild"`) — displays the text as a small label below the globe. Rendered as a DOM element, no additional dependencies needed.<br>**Default:** `"330:75:4:cornflowerblue"` |
+| `archiveSunPhase` | Sunrise and sunset times (UTC) of the archive images, determined by visual inspection. Format: `"HHMM:HHMM"`, e.g. `"0730:1830"`. When set, the module adjusts archive image selection to compensate for seasonal daylight differences between the archive date and today. Requires `lat`/`lon` to be set. Leave empty to disable (direct UTC matching).<br>**Type:** `string` **Default:** `""` |
+| `lat` | Mirror location latitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation.<br>**Type:** `number` **Default:** `50.24127` (Gerolstein) |
+| `lon` | Mirror location longitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation.<br>**Type:** `number` **Default:** `6.6174403` (Gerolstein) |
 
 ### Available styles
 
@@ -150,17 +176,34 @@ The coastline data comes from Natural Earth (`ne_10m_coastline` + `ne_boundary_l
 
 ### Static Fallback for Stale Images
 
-EUMETSAT's data processing pipeline occasionally experiences extended outages (e.g., April 2026: >30 hours of stale imagery). During such events, the module would display the same frozen satellite image for hours or even days. The static fallback feature addresses this by automatically switching to pre-rendered archive images that match the current time of day.
+EUMETSAT's data processing pipeline occasionally experiences extended outages (e.g., April 2026: >30 hours of stale imagery). During such events, the module would display the same frozen satellite image for hours or even days.
 
-**How it works:**
+The static fallback feature addresses this: set **`switchToStaticIfStale: true`** in your config, and the module will automatically detect when the live feed has gone stale and switch to pre-rendered archive images that match the current time of day. When the live feed recovers, the module seamlessly switches back — no manual intervention needed.
+
+#### Enabling the feature
+
+Add `switchToStaticIfStale: true` to your module config. This activates stale detection for all static styles (`europeDiscNat`, `ownImagePath`, etc.). SLIDER styles are not affected — they use a different polling mechanism.
+
+```js
+config: {
+    style: "europeDiscNat",
+    imageSize: 600,
+    switchToStaticIfStale: true,
+    staleFallbackMarker: "330:75:4:cornflowerblue",
+    archiveSunPhase: "0730:1830",
+    lat: 50.24127,
+    lon: 6.6174403
+}
+```
+
+#### How stale detection works
 
 1. On each poll, the module checks the `Last-Modified` HTTP header of the downloaded image
-2. If the image is older than 90 minutes, it is considered stale
-3. The module selects a matching static fallback image from the `static/` subfolder based on the current UTC time
-4. An optional visual marker (configurable dot or text) is drawn on the fallback image to indicate archive mode
-5. When the live feed recovers (fresh image detected), the module automatically switches back to live operation
+2. If the image is older than 90 minutes, it is considered stale and the module switches to a matching archive image
+3. As a fallback for servers that don't send `Last-Modified` headers (e.g., EUMETSAT WMS), the module also tracks content hashes — if 9 consecutive polls return the identical image, it is considered stale
+4. When the live feed recovers (a fresh image is detected), the module automatically switches back to live operation
 
-**Preparing static fallback images:**
+#### Preparing static fallback images
 
 The `static/` subfolder should contain pre-rendered satellite images with coastline overlay, named by UTC time: `0000.jpg`, `0015.jpg`, ..., `2345.jpg` (15-minute intervals recommended, but any subset works). One example image (`1200.jpg`) is included in the repository. To create a full set:
 
@@ -168,9 +211,30 @@ The `static/` subfolder should contain pre-rendered satellite images with coastl
 2. Use a tool like Python/Pillow to merge each saved image with the matching coastline overlay (the `coastlines_europe.png` file included in the module)
 3. Name the merged images as `HHMM.jpg` (UTC time) and place them in the `static/` subfolder
 
-The module scans the `static/` folder at startup and selects the image closest to the current UTC time. If only one image is present, it will be used regardless of the time.
+The module scans the `static/` folder at startup and selects the image closest to the target time. If only one image is present, it will be used regardless of the time.
 
-**Fallback marker configuration examples:**
+#### Seasonal sun phase adjustment
+
+Archive images are captured on a specific date and reflect the day/night pattern of that date. As the seasons change, the actual sunrise and sunset times shift — the same UTC time may show a sunlit Europe in summer but a dark Europe in winter. Without correction, the archive images would show a noticeably wrong day/night boundary.
+
+The **`archiveSunPhase`** parameter compensates for this. Set it to the approximate sunrise and sunset times (UTC) visible in your archive images, determined by visual inspection — look at the images and note when Germany (or your region of interest) first becomes illuminated and when it goes dark. For example, `"0730:1830"` means the archive images show sunrise around 07:30 UTC and sunset around 18:30 UTC.
+
+The module then uses **SunCalc** to compute today's actual sunrise and sunset for your location (`lat`/`lon`) and maps the archive images proportionally:
+
+- The archive sunrise image is shown at today's actual sunrise
+- The archive sunset image is shown at today's actual sunset
+- All images in between are proportionally redistributed
+- Night images (before sunrise and after sunset) are adjusted inversely
+
+This three-segment interpolation ensures the day/night boundary on the globe always looks plausible, regardless of when the archive images were originally captured.
+
+If `archiveSunPhase` is left empty (the default), no seasonal adjustment is applied and archive images are selected by direct UTC time match.
+
+#### Fallback marker
+
+An optional visual marker can indicate that the module is showing archive images instead of live data. Two formats are supported:
+
+**Dot marker** — a small colored dot drawn at a specific pixel position on the globe image, rendered server-side via Python/Pillow:
 
 ```js
 // Subtle blue dot on Germany (default)
@@ -179,16 +243,26 @@ staleFallbackMarker: "330:75:4:cornflowerblue"
 // Larger red dot on Italy
 staleFallbackMarker: "340:130:8:red"
 
-// Text label "archive" in bottom-right corner
-staleFallbackMarker: "archive"
+// Format: "X:Y:Px:Color" — position, size (default 4px), color (default cornflowerblue)
+// Minimum: "X:Y" — uses defaults for size and color
+```
 
-// No marker
+**Text marker** — a small text label displayed below the globe as a DOM element, no additional dependencies needed:
+
+```js
+// Text label below the globe
+staleFallbackMarker: "Archivbild"
+```
+
+**No marker:**
+
+```js
 staleFallbackMarker: "off"
 ```
 
-**Note:** The dot marker is drawn directly onto the image by the backend using Python/Pillow for pixel-perfect positioning. Text markers are rendered as DOM elements by the frontend and require no additional dependencies. Both marker types disappear automatically when the live feed recovers.
+Both marker types disappear automatically when the live feed recovers.
 
-**Dependencies:** The dot marker format (`"X:Y:Px:Color"`) requires Python 3 with Pillow (`python3-pil` or `pip install Pillow`). Pillow is pre-installed on Raspberry Pi OS. Text markers and the stale detection itself have no additional dependencies.
+**Dependencies:** The dot marker format requires Python 3 with Pillow (`python3-pil` or `pip install Pillow`). Pillow is pre-installed on Raspberry Pi OS. Text markers and the stale detection itself have no additional dependencies.
 
 ## Architecture
 
@@ -199,15 +273,21 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 - **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API every 60 seconds for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. On error or timeout, retries after `retryDelay`.
 - **`pollStatic`** (all other styles + `ownImagePath`): Triggers a download at each `updateInterval`. Covers all built-in styles (geoColor, natColor, airMass, fullBand, europeDisc*, centralAmericaDiscNat) as well as custom URLs via `ownImagePath`.
 - **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for meteosat and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains. For static styles with `switchToStaticIfStale` enabled, the `Last-Modified` HTTP header is checked before processing — if the image is older than 90 minutes, `serveStaticFallback` is called instead.
-- **`serveStaticFallback`** (stale image handler): Selects a time-appropriate image from the `static/` subfolder, optionally draws a dot marker via Python/Pillow subprocess, writes it to `current.png`, and sends it to the frontend with a `fallbackText` field for text markers. Called automatically when the live feed is detected as stale.
+- **`serveStaticFallback`** (stale image handler): Selects a time-appropriate image from the `static/` subfolder, optionally draws a dot marker via Python/Pillow subprocess, writes it to `current.png`, and sends it to the frontend with a `fallbackText` field for text markers. Called automatically when the live feed is detected as stale. When `archiveSunPhase` is configured, uses `mapToArchiveTime` for seasonal day/night adjustment.
+- **`mapToArchiveTime`** (seasonal adjustment): Maps the current UTC time to an archive-equivalent time using three-segment linear interpolation based on SunCalc sunrise/sunset data. Ensures the archive image's day/night boundary matches the current season.
 
 **Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` (static styles only — SLIDER styles have natural coastlines).
 
 ## What changed compared to the original?
 
+### v3.2.1 — Seasonal sun phase adjustment (Apr 2026)
+
+- **Seasonal archive image mapping**: New `archiveSunPhase` parameter compensates for seasonal daylight differences between archive images and the current date. Uses SunCalc (from MagicMirror's built-in modules) to compute today's sunrise/sunset and maps archive images proportionally via three-segment interpolation (pre-dawn night, daytime, post-dusk night). The day/night boundary on the globe now always matches the actual time of year.
+- **Mirror location**: New `lat`/`lon` config parameters for SunCalc calculation (default: Gerolstein).
+
 ### v3.2.0 — Static fallback for stale images (Apr 2026)
 
-- **Automatic stale detection**: When the live satellite feed has not updated for 90 minutes (checked via `Last-Modified` HTTP header), the module automatically switches to pre-rendered static fallback images from the `static/` subfolder. Works with `europeDiscNat`, `ownImagePath`, and other static styles.
+- **Automatic stale detection**: Set `switchToStaticIfStale: true` to enable. When the live satellite feed has not updated for 90 minutes (checked via `Last-Modified` HTTP header, with hash-based fallback for servers without `Last-Modified`), the module automatically switches to pre-rendered static fallback images from the `static/` subfolder. Works with `europeDiscNat`, `ownImagePath`, and other static styles.
 - **Time-matched fallback images**: Fallback images are named by UTC time (`HHMM.jpg`) and the module selects the one closest to the current time, so the displayed globe always shows a realistic day/night pattern.
 - **Configurable visual marker**: A small dot (rendered server-side via Python/Pillow) or text label (rendered as DOM element) can indicate archive mode. Dot markers offer pixel-perfect positioning on the globe image; text markers appear below the globe and require no additional dependencies.
 - **Automatic recovery**: When the live feed returns (fresh `Last-Modified` detected), the module seamlessly switches back to live operation.

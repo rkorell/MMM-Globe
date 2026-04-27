@@ -26,6 +26,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { execSync } = require("child_process");
+const SunCalc = require("suncalc");
 
 const SLIDER_BASE_URL = "https://slider.cira.colostate.edu";
 const SLIDER_PRODUCT = "full_disk/geocolor";
@@ -167,15 +168,70 @@ module.exports = NodeHelper.create({
     }
   },
 
+  // Map current UTC time to archive time using three-segment interpolation
+  // Adjusts for seasonal daylight differences between archive date and today
+  mapToArchiveTime: function(now) {
+    var config = this.config;
+    var parts = config.archiveSunPhase.split(":");
+    if (parts.length !== 2) return null;
+
+    var archiveSunrise = parseInt(parts[0].substring(0, 2), 10) * 60 + parseInt(parts[0].substring(2, 4), 10);
+    var archiveSunset = parseInt(parts[1].substring(0, 2), 10) * 60 + parseInt(parts[1].substring(2, 4), 10);
+
+    var sunTimes = SunCalc.getTimes(now, config.lat, config.lon);
+    var currentSunrise = sunTimes.sunrise.getUTCHours() * 60 + sunTimes.sunrise.getUTCMinutes();
+    var currentSunset = sunTimes.sunset.getUTCHours() * 60 + sunTimes.sunset.getUTCMinutes();
+
+    var currentMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+    var mappedMinutes;
+
+    if (currentMinutes <= currentSunrise) {
+      // Segment 1: Night before sunrise
+      var factor = currentSunrise > 0 ? currentMinutes / currentSunrise : 0;
+      mappedMinutes = Math.round(factor * archiveSunrise);
+    } else if (currentMinutes <= currentSunset) {
+      // Segment 2: Daytime
+      var factor = (currentMinutes - currentSunrise) / (currentSunset - currentSunrise);
+      mappedMinutes = Math.round(archiveSunrise + factor * (archiveSunset - archiveSunrise));
+    } else {
+      // Segment 3: Night after sunset
+      var nightLength = 1440 - currentSunset;
+      var factor = nightLength > 0 ? (currentMinutes - currentSunset) / nightLength : 0;
+      mappedMinutes = Math.round(archiveSunset + factor * (1440 - archiveSunset));
+    }
+
+    mappedMinutes = Math.max(0, Math.min(1439, mappedMinutes));
+    var hh = ("0" + Math.floor(mappedMinutes / 60)).slice(-2);
+    var mm = ("0" + (mappedMinutes % 60)).slice(-2);
+    return hh + mm;
+  },
+
   serveStaticFallback: function() {
     if (this.staticFallbackImages.length === 0) return;
 
     var now = new Date();
-    var currentHHMM = ("0" + now.getUTCHours()).slice(-2) + ("0" + now.getUTCMinutes()).slice(-2);
+    var currentHHMM;
+
+    // Apply seasonal sun phase mapping if configured
+    if (this.config.archiveSunPhase) {
+      var mapped = this.mapToArchiveTime(now);
+      if (mapped) {
+        currentHHMM = mapped;
+        this.log("DEBUG", "Archive time mapping: UTC " +
+          ("0" + now.getUTCHours()).slice(-2) + ":" + ("0" + now.getUTCMinutes()).slice(-2) +
+          " → archive " + mapped.substring(0, 2) + ":" + mapped.substring(2, 4) +
+          " (archiveSunPhase: " + this.config.archiveSunPhase + ")");
+      } else {
+        currentHHMM = ("0" + now.getUTCHours()).slice(-2) + ("0" + now.getUTCMinutes()).slice(-2);
+      }
+    } else {
+      currentHHMM = ("0" + now.getUTCHours()).slice(-2) + ("0" + now.getUTCMinutes()).slice(-2);
+    }
+
     var chosen = this.staticFallbackImages[0]; // default: first image
 
     if (this.staticFallbackImages.length > 1) {
-      // Find nearest image to current UTC time
+      // Find nearest image to target time
       for (var i = 0; i < this.staticFallbackImages.length; i++) {
         if (this.staticFallbackImages[i] <= currentHHMM) {
           chosen = this.staticFallbackImages[i];
