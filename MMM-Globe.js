@@ -21,8 +21,8 @@ Module.register("MMM-Globe", {
     switchToStaticIfStale: false,      // true: show static fallback images when live feed is stale (>90min unchanged)
     staleFallbackMarker: "330:75:4:cornflowerblue",  // "off", "X:Y:Px:Color" for dot, or any text for label
     archiveSunPhase: "",               // "HHMM:HHMM" sunrise:sunset UTC of archive images, e.g. "0730:1830"
-    lat: 50.24127,                     // Mirror location latitude (for seasonal sun phase mapping)
-    lon: 6.6174403                     // Mirror location longitude
+    lat: 52.52,                        // Mirror location latitude (for seasonal sun phase mapping)
+    lon: 13.405                        // Mirror location longitude
   },
 
   // SLIDER style names (must match keys in node_helper SLIDER_SATELLITES + alias)

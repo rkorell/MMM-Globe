@@ -82,8 +82,8 @@ Full configuration with all options:
         switchToStaticIfStale: true,      // show archive images when live feed is stale (>90min)
         staleFallbackMarker: "330:75:4:cornflowerblue",  // "off", "X:Y:Px:Color", or text label
         archiveSunPhase: "0730:1830",     // sunrise:sunset UTC of archive images (seasonal adjust)
-        lat: 50.24127,                    // mirror location latitude (for seasonal adjustment)
-        lon: 6.6174403                    // mirror location longitude
+        lat: 52.52,                       // mirror location latitude (for seasonal adjustment)
+        lon: 13.405                       // mirror location longitude
     }
 },
 ```
@@ -103,8 +103,8 @@ Full configuration with all options:
 | `switchToStaticIfStale` | When `true`, automatically switches to pre-rendered static fallback images if the live satellite feed has not updated for 90 minutes. Only applies to static styles (`europeDiscNat`, `ownImagePath`, etc.), not SLIDER styles. See [Static Fallback for Stale Images](#static-fallback-for-stale-images) below.<br>**Type:** `boolean` **Default:** `false` |
 | `staleFallbackMarker` | Visual marker to indicate archive mode on fallback images. Three formats:<br>• `"off"` — no marker<br>• `"X:Y"` or `"X:Y:Px"` or `"X:Y:Px:Color"` — draws a dot at pixel position X,Y with optional size (default 4px) and color (default `cornflowerblue`). Rendered server-side via Python/Pillow. Example: `"330:75:4:cornflowerblue"` places a subtle dot on Germany.<br>• Any other text (e.g. `"Archivbild"`) — displays the text as a small label below the globe. Rendered as a DOM element, no additional dependencies needed.<br>**Default:** `"330:75:4:cornflowerblue"` |
 | `archiveSunPhase` | Sunrise and sunset times (UTC) of the archive images, determined by visual inspection. Format: `"HHMM:HHMM"`, e.g. `"0730:1830"`. When set, the module adjusts archive image selection to compensate for seasonal daylight differences between the archive date and today. Requires `lat`/`lon` to be set. Leave empty to disable (direct UTC matching).<br>**Type:** `string` **Default:** `""` |
-| `lat` | Mirror location latitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation.<br>**Type:** `number` **Default:** `50.24127` (Gerolstein) |
-| `lon` | Mirror location longitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation.<br>**Type:** `number` **Default:** `6.6174403` (Gerolstein) |
+| `lat` | Mirror location latitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation.<br>**Type:** `number` **Default:** `52.52` (Berlin) |
+| `lon` | Mirror location longitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation.<br>**Type:** `number` **Default:** `13.405` (Berlin) |
 
 ### Available styles
 
@@ -191,8 +191,8 @@ config: {
     switchToStaticIfStale: true,
     staleFallbackMarker: "330:75:4:cornflowerblue",
     archiveSunPhase: "0730:1830",
-    lat: 50.24127,
-    lon: 6.6174403
+    lat: 52.52,
+    lon: 13.405
 }
 ```
 
@@ -283,7 +283,7 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 ### v3.2.1 — Seasonal sun phase adjustment (Apr 2026)
 
 - **Seasonal archive image mapping**: New `archiveSunPhase` parameter compensates for seasonal daylight differences between archive images and the current date. Uses SunCalc (from MagicMirror's built-in modules) to compute today's sunrise/sunset and maps archive images proportionally via three-segment interpolation (pre-dawn night, daytime, post-dusk night). The day/night boundary on the globe now always matches the actual time of year.
-- **Mirror location**: New `lat`/`lon` config parameters for SunCalc calculation (default: Gerolstein).
+- **Mirror location**: New `lat`/`lon` config parameters for SunCalc calculation (default: Berlin).
 
 ### v3.2.0 — Static fallback for stale images (Apr 2026)
 
