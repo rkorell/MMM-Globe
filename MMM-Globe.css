@@ -19,7 +19,8 @@
 	left: 0;
 	clip-path: circle(50% at 50% 50%);
 	opacity: 0.3;
-	transform: scale(0.98);
+	/* Calibrated for MSG rgb_naturalenhncd 600x600 displayed at imageSize:750 */
+	transform: translate(0, -10px) scale(0.958);
 	transform-origin: center center;
 }
 
