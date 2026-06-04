@@ -145,5 +145,15 @@ Module.register("MMM-Globe", {
     }
 
     return wrapper;
+  },
+
+  // Passive integration with MMM-PresenceScreenControl:
+  // forward screen on/off state to the backend so retries can be suppressed
+  // while nobody is watching. Works only if PSC is installed and emits this
+  // notification; otherwise the backend keeps its default (screenOn = true).
+  notificationReceived: function(notification, payload) {
+    if (notification === "MMM_PSC-SCREEN_POWERSTATUS" && typeof payload === "boolean") {
+      this.sendSocketNotification("SET_SCREEN_STATE", payload);
+    }
   }
 });

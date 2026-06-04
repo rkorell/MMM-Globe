@@ -264,6 +264,24 @@ Both marker types disappear automatically when the live feed recovers.
 
 **Dependencies:** The dot marker format requires Python 3 with Pillow (`python3-pil` or `pip install Pillow`). Pillow is pre-installed on Raspberry Pi OS. Text markers and the stale detection itself have no additional dependencies.
 
+## Reliability & error handling
+
+Some upstream APIs (notably the EUMETSAT WMS GeoServer used via `ownImagePath`) occasionally respond with HTTP 200 but an OGC `<ServiceExceptionReport>` XML body instead of an image — typically during maintenance windows or transient connection-pool exhaustion.
+
+Since v3.2.2, MMM-Globe validates every downloaded response against known image signatures (PNG, JPEG, GIF) before writing it to disk. Invalid responses (XML, HTML error pages, empty bodies) are discarded — the frontend keeps showing the last valid image rather than a broken one. Failed responses do not corrupt the `current.png` file shown on the mirror.
+
+When a response fails validation, the module retries the request up to two times with backoff (30 s, then 90 s) within the same poll cycle. If all retries fail, a single line is emitted at WARN log level and the module waits for the next regular poll. Polling frequency itself is never reduced — your image archive (when `enableImageSaving` is on) continues to grow at the configured rate.
+
+## Optional integration with MMM-PresenceScreenControl
+
+MMM-Globe passively listens for the `MMM_PSC-SCREEN_POWERSTATUS` notification emitted by [MMM-PresenceScreenControl](https://github.com/rkorell/MMM-PresenceScreenControl).
+
+If that module is installed and reports that the screen is currently off (no presence, or inside a configured cron-off window), MMM-Globe suspends its retry attempts on upstream failures. The regular polling cycle continues unchanged, so your image archive stays complete, but the module won't issue extra retry requests that nobody would see anyway.
+
+This is purely an optional optimisation. MMM-Globe works exactly the same way without MMM-PresenceScreenControl installed — the notification is simply never received, and retries always run.
+
+[MMM-PresenceScreenControl](https://github.com/rkorell/MMM-PresenceScreenControl) is a presence and screen-power management module for MagicMirror² with PIR/MQTT sensor support, cron-based on/off and always-on windows, click-to-wake, and a notification API for cross-module integration. If you run MagicMirror on a Raspberry Pi with a display that should turn on and off based on presence, it's worth a look.
+
 ## Architecture
 
 The module uses a clean backend/frontend separation. The frontend knows nothing about remote URLs, polling, or image saving — it only displays what the backend provides.
@@ -279,6 +297,14 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 **Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` (static styles only — SLIDER styles have natural coastlines).
 
 ## What changed compared to the original?
+
+### v3.2.2 — Image content validation, retries, PSC integration (Jun 2026)
+
+- **Magic-byte validation**: Every downloaded response is checked against known image signatures (PNG, JPEG, GIF) before being written to disk. Prevents XML error bodies (notably from EUMETSAT WMS under load) from polluting `current.png` or the saved image archive.
+- **Automatic retry with backoff**: When a response fails validation, the module retries up to two times within the same poll cycle (30 s, then 90 s) before giving up and waiting for the next regular poll.
+- **Optional PSC integration**: Passively listens for `MMM_PSC-SCREEN_POWERSTATUS` from [MMM-PresenceScreenControl](https://github.com/rkorell/MMM-PresenceScreenControl). When the screen is reported as off, retries are suspended (regular polling continues unchanged).
+- **No new config parameters**: All retry behaviour is internal. The module works identically without PSC installed.
+- **Lazy static-fallback indexing**: The `static/` directory is now scanned only when the stale-fallback feature is actually triggered for the first time, not eagerly at module startup. Reduces startup work for the (common) case where the fallback never fires.
 
 ### v3.2.1 — Seasonal sun phase adjustment (Apr 2026)
 

@@ -18,6 +18,8 @@
  * pre-rendered static images from the static/ subfolder, matched to the
  * current UTC time. A configurable dot or text marker indicates archive mode.
  */
+// Modified: 2026-06-04 - Validate PNG/JPEG/GIF magic bytes, retry on validation failure (PSC-aware)
+// Modified: 2026-06-04 - Lazy-load static fallback index (only when first stale event triggers)
 
 const NodeHelper = require("node_helper");
 const https = require("https");
@@ -41,6 +43,8 @@ const HTTP_TIMEOUT = 15 * 1000;       // timeout for JSON/small requests
 const HTTP_TIMEOUT_IMAGE = 30 * 1000; // timeout for image downloads
 const STALE_THRESHOLD_MS = 90 * 60 * 1000;  // 90 min — image older than this triggers fallback (Last-Modified)
 const STALE_HASH_COUNT = 9;                  // 9 identical polls — hash-based fallback when no Last-Modified (9 × 10min = 90min)
+const RETRY_DELAYS_MS = [30 * 1000, 90 * 1000];  // Backoff sequence for retries after validation failure
+const RETRY_MAX = RETRY_DELAYS_MS.length;
 
 // Log levels: ERROR (default) < WARN < INFO < DEBUG
 const LOG_LEVELS = { ERROR: 0, WARN: 1, INFO: 2, DEBUG: 3 };
@@ -55,6 +59,21 @@ const IMAGE_URLS = {
   europeDiscSnow: "https://eumetview.eumetsat.int/static-images/latestImages/EUMETSAT_MSG_RGBSolarDay_LowResolution.jpg",
   centralAmericaDiscNat: "https://cdn.star.nesdis.noaa.gov/GOES16/ABI/FD/GEOCOLOR/678x678.jpg"
 };
+// Validate that a buffer starts with a known image signature (PNG/JPEG/GIF).
+// Rejects XML/HTML error bodies, empty responses, and plain text — the kinds
+// of payload some upstream APIs (notably the EUMETSAT WMS) return with HTTP
+// 200 under load.
+function isValidImageBuffer(buffer) {
+  if (!buffer || buffer.length < 4) return false;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) return true;
+  // JPEG: FF D8 FF
+  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) return true;
+  // GIF: 47 49 46 38 ("GIF8" — both 87a and 89a)
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return true;
+  return false;
+}
+
 const HIRES_IMAGE_URLS = {
   natColor: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest_hi_res/himawari-8/full_disk_ahi_natural_color.jpg",
   geoColor: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest_hi_res/himawari-8/full_disk_ahi_true_color.jpg",
@@ -77,6 +96,8 @@ module.exports = NodeHelper.create({
   staleFallbackActive: false,
   staticFallbackImages: [],
   staleCount: 0,
+  screenOn: true,   // Optimistic default — overridden via SET_SCREEN_STATE if PSC is present
+  staticFallbackIndexed: false,   // Lazy: static/ folder is scanned on first stale event, not at startup
 
   log: function(level, msg) {
     if (LOG_LEVELS[level] > this.logLevel) {
@@ -111,6 +132,11 @@ module.exports = NodeHelper.create({
       this.logLevel = LOG_LEVELS[payload.logLevel] !== undefined
         ? LOG_LEVELS[payload.logLevel] : LOG_LEVELS.ERROR;
       this.setupAndPoll();
+    } else if (notification === "SET_SCREEN_STATE") {
+      if (typeof payload === "boolean") {
+        this.screenOn = payload;
+        this.log("DEBUG", "Screen state updated via PSC: " + payload);
+      }
     }
   },
 
@@ -140,11 +166,6 @@ module.exports = NodeHelper.create({
       this.staticUrl = HIRES_IMAGE_URLS[config.style];
     } else {
       this.staticUrl = IMAGE_URLS[config.style];
-    }
-
-    // Load static fallback images if feature is enabled
-    if (config.switchToStaticIfStale) {
-      this.loadStaticFallbackImages();
     }
 
     this.log("DEBUG", "Static poll interval: " + (config.updateInterval / 1000) + "s, URL: " + this.staticUrl);
@@ -207,6 +228,10 @@ module.exports = NodeHelper.create({
   },
 
   serveStaticFallback: function() {
+    if (!this.staticFallbackIndexed) {
+      this.loadStaticFallbackImages();
+      this.staticFallbackIndexed = true;
+    }
     if (this.staticFallbackImages.length === 0) return;
 
     var now = new Date();
@@ -367,8 +392,9 @@ module.exports = NodeHelper.create({
   // filename provided (SLIDER): save with that name, dedup by file existence.
   // filename omitted (static):  generate timestamped name, dedup by content hash.
 
-  downloadAndServe: function(imageUrl, filename) {
+  downloadAndServe: function(imageUrl, filename, retryAttempt) {
     var self = this;
+    if (typeof retryAttempt !== "number") retryAttempt = 0;
     var saveDir = this.ensureImagesDir();
     var currentFile = path.join(saveDir, "current.png");
 
@@ -377,7 +403,7 @@ module.exports = NodeHelper.create({
       if (res.statusCode === 200) {
         // Stale detection via Last-Modified header (only for static styles)
         var staleHandledByHeader = false;
-        if (!filename && self.config.switchToStaticIfStale && self.staticFallbackImages.length > 0) {
+        if (!filename && self.config.switchToStaticIfStale) {
           var lastModified = res.headers["last-modified"];
           if (lastModified) {
             var imageAge = Date.now() - new Date(lastModified).getTime();
@@ -400,6 +426,31 @@ module.exports = NodeHelper.create({
         res.on("end", function() {
           var buffer = Buffer.concat(chunks);
 
+          if (!isValidImageBuffer(buffer)) {
+            var preview = buffer.toString("hex", 0, Math.min(16, buffer.length));
+            self.log("DEBUG",
+              "Validation failed for " + imageUrl
+              + " (size: " + buffer.length + " bytes, first 16 hex: " + preview + ")");
+
+            if (!self.screenOn) {
+              self.log("DEBUG", "Skipping retry: screen off");
+              return;
+            }
+            if (retryAttempt >= RETRY_MAX) {
+              self.log("WARN",
+                "Failed to get valid image from " + imageUrl
+                + " after " + RETRY_MAX + " retries");
+              return;
+            }
+
+            var delay = RETRY_DELAYS_MS[retryAttempt];
+            self.log("DEBUG", "Retrying in " + (delay / 1000) + "s (" + (retryAttempt + 1) + "/" + RETRY_MAX + ")");
+            setTimeout(function() {
+              self.downloadAndServe(imageUrl, filename, retryAttempt + 1);
+            }, delay);
+            return;
+          }
+
           // Compute content hash for static paths (used for dedup and hash-based stale detection)
           var hash = null;
           if (!filename) {
@@ -407,7 +458,7 @@ module.exports = NodeHelper.create({
           }
 
           // Hash-based stale detection (fallback when no Last-Modified header)
-          if (hash && self.config.switchToStaticIfStale && !staleHandledByHeader && self.staticFallbackImages.length > 0) {
+          if (hash && self.config.switchToStaticIfStale && !staleHandledByHeader) {
             if (hash === self.lastImageHash) {
               self.staleCount = Math.min(self.staleCount + 1, STALE_HASH_COUNT);
               if (self.staleCount >= STALE_HASH_COUNT) {
