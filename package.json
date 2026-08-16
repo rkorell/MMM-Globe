@@ -4,8 +4,20 @@
   "description": "MagicMirror module for displaying satellite imagery from various geostationary satellites",
   "main": "MMM-Globe.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "eslint ."
   },
+  "keywords": [
+    "magicmirror",
+    "mmm",
+    "magicmirror-module",
+    "globe",
+    "satellite",
+    "weather",
+    "goes",
+    "meteosat",
+    "himawari"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rkorell/MMM-Globe.git"
@@ -15,5 +27,10 @@
   "bugs": {
     "url": "https://github.com/rkorell/MMM-Globe/issues"
   },
-  "homepage": "https://github.com/rkorell/MMM-Globe#readme"
+  "homepage": "https://github.com/rkorell/MMM-Globe#readme",
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^16.0.0"
+  }
 }

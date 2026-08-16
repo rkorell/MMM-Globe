@@ -41,6 +41,15 @@ pip install -r requirements.txt
 ```
 Text markers and all other features work without Pillow.
 
+## Update
+
+To update the module to the latest version, navigate into the module folder and pull the latest changes:
+```bash
+cd ~/MagicMirror/modules/MMM-Globe
+git pull
+```
+The module uses only Node.js built-in modules, so no `npm install` is required after updating.
+
 ## Configuration
 
 Add the following to your `config.js`:
