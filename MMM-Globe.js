@@ -17,6 +17,7 @@ Module.register("MMM-Globe", {
     retryDelay: 30 * 1000,           // retry delay on load failure (30 seconds)
     enableImageSaving: false,         // save satellite images locally (images/ subfolder)
     coastlines: false,                // false, "europe", "americas", "asia"
+    clipRadius: null,                 // null = default circle (50%, 44% for centralAmericaDiscNat); number = override clip radius in % (e.g. 48.55 to crop away the EUMETSAT WMS footer)
     logLevel: "ERROR",                  // "ERROR", "WARN", "INFO", "DEBUG"
     switchToStaticIfStale: false,      // true: show static fallback images when live feed is stale (>90min unchanged)
     staleFallbackMarker: "330:75:4:cornflowerblue",  // "off", "X:Y:Px:Color" for dot, or any text for label
@@ -93,6 +94,12 @@ Module.register("MMM-Globe", {
     var wrapper = document.createElement("div");
 
     if (this.loadedImage) {
+      // Optional clip-path override (e.g. 48.55 to crop away the EUMETSAT WMS footer);
+      // null leaves the per-style CSS default (50%, or 44% for centralAmericaDiscNat).
+      var clipOverride = (typeof this.config.clipRadius === "number")
+        ? "circle(" + this.config.clipRadius + "% at 50% 50%)"
+        : null;
+
       // Coastlines only for static styles — SLIDER images have natural coastlines
       var isSliderStyle = this.SLIDER_STYLES.indexOf(this.config.style) !== -1;
       var useCoastlines = !isSliderStyle && this.config.coastlines &&
@@ -107,6 +114,7 @@ Module.register("MMM-Globe", {
         coastlines.src = this.file("coastlines_" + this.config.coastlines + ".png");
         coastlines.width = this.config.imageSize.toString();
         coastlines.height = this.config.imageSize.toString();
+        if (clipOverride) { coastlines.style.clipPath = clipOverride; }
         container.appendChild(coastlines);
 
         var image = this.loadedImage.cloneNode();
@@ -117,6 +125,7 @@ Module.register("MMM-Globe", {
         }
         image.width = this.config.imageSize.toString();
         image.height = this.config.imageSize.toString();
+        if (clipOverride) { image.style.clipPath = clipOverride; }
         container.appendChild(image);
 
         wrapper.appendChild(container);
@@ -129,6 +138,7 @@ Module.register("MMM-Globe", {
         }
         image.width = this.config.imageSize.toString();
         image.height = this.config.imageSize.toString();
+        if (clipOverride) { image.style.clipPath = clipOverride; }
         var container = document.createElement("div");
         container.className = "MMM-Globe-container";
         container.appendChild(image);

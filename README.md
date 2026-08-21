@@ -108,6 +108,7 @@ Full configuration with all options:
 | `retryDelay` | Delay before retrying after a failed SLIDER API poll (milliseconds). For non-SLIDER styles, retries happen automatically at the next `updateInterval`.<br>**Default:** `30000` (30 seconds) |
 | `enableImageSaving` | Save each satellite image to the `images/` subfolder. For the `meteosat` style, files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`) and duplicates are skipped automatically. For other styles, files are named with the local download time and duplicate images are detected via content hash (identical images are not saved again).<br>**Type:** `boolean` **Default:** `false` |
 | `coastlines` | Show a coastline and country border underlay beneath the satellite image. **Only applies to static styles** — SLIDER styles (geoColor*) already have natural coastlines in the GeoColor imagery. The underlay is subtle (semi-transparent white lines on black) and only visible where the satellite image is dark (night side), thanks to CSS `mix-blend-mode: lighten`. Choose the projection matching your satellite view.<br>**Values:** `false` (off), `"europe"` (0° longitude), `"americas"` (-75.2° longitude), `"asia"` (140.7° longitude)<br>**Default:** `false` |
+| `clipRadius` | Override the circular clip radius (in percent) of the displayed globe. Leave at `null` to keep the per-style default (50%, or 44% for `centralAmericaDiscNat`). Set a smaller value to crop away an unwanted image border or footer on **any** background — for example, EUMETSAT WMS images carry a footer bar (logo + timestamp) at the bottom that `clipRadius: 48.55` removes cleanly. The override also applies to the `coastlines` underlay so it stays aligned with the cropped image. Because a custom `ownImagePath` cannot be identified as EUMETSAT, this is opt-in per module instance rather than automatic.<br>**Type:** `number` (or `null`) **Default:** `null` |
 | `logLevel` | Controls logging verbosity in pm2 logs. `"ERROR"`: only errors. `"WARN"`: adds warnings (e.g., failed fetches). `"INFO"`: adds new images and saves. `"DEBUG"`: adds poll activity, startup details, and duplicate detection.<br>**Values:** `"ERROR"`, `"WARN"`, `"INFO"`, `"DEBUG"` **Default:** `"ERROR"` |
 | `switchToStaticIfStale` | When `true`, automatically switches to pre-rendered static fallback images if the live satellite feed has not updated for 90 minutes. Only applies to static styles (`europeDiscNat`, `ownImagePath`, etc.), not SLIDER styles. See [Static Fallback for Stale Images](#static-fallback-for-stale-images) below.<br>**Type:** `boolean` **Default:** `false` |
 | `staleFallbackMarker` | Visual marker to indicate archive mode on fallback images. Three formats:<br>• `"off"` — no marker<br>• `"X:Y"` or `"X:Y:Px"` or `"X:Y:Px:Color"` — draws a dot at pixel position X,Y with optional size (default 4px) and color (default `cornflowerblue`). Rendered server-side via Python/Pillow. Example: `"330:75:4:cornflowerblue"` places a subtle dot on Germany.<br>• Any other text (e.g. `"Archivbild"`) — displays the text as a small label below the globe. Rendered as a DOM element, no additional dependencies needed.<br>**Default:** `"330:75:4:cornflowerblue"` |
@@ -158,6 +159,8 @@ config: {
 ```
 
 The key parameter is `srs=AUTO:42003,9001,{longitude},0` — this geostationary projection centered on the satellite's longitude produces a round Earth disc. Set `BGCOLOR=0x000000` for a black background.
+
+**Footer bar:** EUMETSAT WMS images carry a footer bar (logo + timestamp) at the bottom. Add `clipRadius: 48.55` to crop it away — this works on any mirror background, not just black. Thanks to [@Muffexx](https://github.com/Muffexx) for the idea ([#1](https://github.com/rkorell/MMM-Globe/issues/1)).
 
 Some useful WMS layers:
 
@@ -306,6 +309,12 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 **Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` (static styles only — SLIDER styles have natural coastlines).
 
 ## What changed compared to the original?
+
+### v3.3.0 — Configurable clip radius, footer overlay removed (Aug 2026)
+
+- **New `clipRadius` parameter**: Overrides the circular clip radius (in percent) of the displayed globe, applied inline to both the satellite image and the coastline underlay. Lets you crop away an image border or footer on any background — e.g. `clipRadius: 48.55` removes the EUMETSAT WMS footer bar. Defaults to `null` (unchanged per-style behaviour: 50%, or 44% for `centralAmericaDiscNat`).
+- **Removed the black footer overlay**: The previous CSS `::after` black bar (added to mask the EUMETSAT footer) only worked on a black mirror background and left a visible black rectangle on custom backgrounds. It is replaced by the background-agnostic `clipRadius` crop. Existing setups relying on the bar for EUMETSAT should set `clipRadius: 48.55`.
+- **Thanks** to [@Muffexx](https://github.com/Muffexx) for suggesting the clip-based approach in issue [#1](https://github.com/rkorell/MMM-Globe/issues/1), which motivated this release.
 
 ### v3.2.2 — Image content validation, retries, PSC integration (Jun 2026)
 
