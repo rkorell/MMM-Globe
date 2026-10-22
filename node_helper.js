@@ -22,6 +22,7 @@
 // Modified: 2026-06-04 - Validate PNG/JPEG/GIF magic bytes, retry on validation failure (PSC-aware)
 // Modified: 2026-06-04 - Lazy-load static fallback index (only when first stale event triggers)
 // Modified: 2026-10-22 12:46 - Add sliderPollInterval config option, clamped to 60s minimum (issue #2)
+// Modified: 2026-10-22 23:40 - Single SLIDER poll timer; keep slot open when the image download fails (issue #2)
 
 const NodeHelper = require("node_helper");
 const https = require("https");
@@ -93,6 +94,7 @@ module.exports = NodeHelper.create({
   config: null,
   staticUrl: null,
   sliderSatPath: null,
+  sliderTimer: null,   // the one pending SLIDER poll (see rescheduleSlider)
   logLevel: 0,
   imagesDir: null,
   staleFallbackActive: false,
@@ -338,6 +340,18 @@ module.exports = NodeHelper.create({
   // --- SLIDER polling (geoColorEurope/USA/Pacific/Asia) ---
   // Polls latest_times.json at sliderPollInterval, detects new images by timestamp comparison.
 
+  // Every SLIDER path plans its successor through here, and the previous timer is
+  // cleared first, so exactly one poll is ever pending. Needed because the timeout
+  // handler calls req.destroy(), which emits an additional error event: without
+  // this, the timeout path and the error path it triggers would each plan a
+  // successor and the poll chain would double with every timeout. Already doubled
+  // chains collapse back to one at their next reschedule, without a restart.
+  rescheduleSlider: function(delay) {
+    var self = this;
+    clearTimeout(this.sliderTimer);
+    this.sliderTimer = setTimeout(function() { self.pollSlider(); }, delay);
+  },
+
   pollSlider: function() {
     var self = this;
     var satPath = this.sliderSatPath;
@@ -354,34 +368,42 @@ module.exports = NodeHelper.create({
 
             if (ts === self.lastTimestamp) {
               self.log("DEBUG", "SLIDER poll: no new image (latest: " + ts + ")");
-              setTimeout(function() { self.pollSlider(); }, self.sliderPollInterval);
+              self.rescheduleSlider(self.sliderPollInterval);
               return;
             }
 
-            self.lastTimestamp = ts;
             var dateStr = ts.substring(0, 4) + "/" + ts.substring(4, 6) + "/" + ts.substring(6, 8);
             var imageUrl = SLIDER_BASE_URL + "/data/imagery/"
               + dateStr + "/" + satPath + "---" + SLIDER_PRODUCT + "/" + ts + "/00/000_000.png";
 
             self.log("INFO", "New SLIDER image: " + ts);
-            self.downloadAndServe(imageUrl, "globe_" + ts + ".png");
+
+            // Plan the next poll before the download, so the chain never depends
+            // on it finishing. The timestamp is only marked as done once the image
+            // has actually arrived — a failed download therefore leaves the slot
+            // open and the next poll fetches it again instead of skipping it.
+            self.rescheduleSlider(self.sliderPollInterval);
+            self.downloadAndServe(imageUrl, "globe_" + ts + ".png", 0, function() {
+              self.lastTimestamp = ts;
+            });
+            return;
           } catch (e) {
             self.log("ERROR", "SLIDER JSON parse error: " + e.message);
           }
         } else {
           self.log("WARN", "SLIDER timestamp fetch failed (HTTP " + res.statusCode + ")");
         }
-        setTimeout(function() { self.pollSlider(); }, self.sliderPollInterval);
+        self.rescheduleSlider(self.sliderPollInterval);
       });
     });
     req.on("error", function(e) {
       self.log("ERROR", "SLIDER fetch error: " + e.message);
-      setTimeout(function() { self.pollSlider(); }, self.config.retryDelay);
+      self.rescheduleSlider(self.config.retryDelay);
     });
     req.setTimeout(HTTP_TIMEOUT, function() {
       req.destroy();
       self.log("WARN", "SLIDER timestamp fetch timeout");
-      setTimeout(function() { self.pollSlider(); }, self.config.retryDelay);
+      self.rescheduleSlider(self.config.retryDelay);
     });
   },
 
@@ -405,7 +427,13 @@ module.exports = NodeHelper.create({
   // filename provided (SLIDER): save with that name, dedup by file existence.
   // filename omitted (static):  generate timestamped name, dedup by content hash.
 
-  downloadAndServe: function(imageUrl, filename, retryAttempt) {
+  // onSuccess (optional) is called exactly once, and only when the image has been
+  // written and handed to the frontend. Every other outcome — validation failure,
+  // exhausted retries, screen off, HTTP error, socket error, timeout, unwritable
+  // file — stays silent by design, so the SLIDER caller does not mark the slot as
+  // done and fetches it again on the next poll. pollStatic passes no callback and
+  // is unaffected.
+  downloadAndServe: function(imageUrl, filename, retryAttempt, onSuccess) {
     var self = this;
     if (typeof retryAttempt !== "number") retryAttempt = 0;
     var saveDir = this.ensureImagesDir();
@@ -459,7 +487,7 @@ module.exports = NodeHelper.create({
             var delay = RETRY_DELAYS_MS[retryAttempt];
             self.log("DEBUG", "Retrying in " + (delay / 1000) + "s (" + (retryAttempt + 1) + "/" + RETRY_MAX + ")");
             setTimeout(function() {
-              self.downloadAndServe(imageUrl, filename, retryAttempt + 1);
+              self.downloadAndServe(imageUrl, filename, retryAttempt + 1, onSuccess);
             }, delay);
             return;
           }
@@ -541,6 +569,9 @@ module.exports = NodeHelper.create({
                 isFallback: false,
                 fallbackText: null
               });
+              if (typeof onSuccess === "function") {
+                onSuccess();
+              }
             }
           });
         });

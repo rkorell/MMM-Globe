@@ -312,6 +312,13 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 
 ## What changed compared to the original?
 
+### v3.4.1 — Two SLIDER polling defects (Oct 2026)
+
+- **Poll chain no longer multiplies after a timeout**: `req.destroy()` in the timeout handler also emits an `error` event, so the timeout path and the error path each scheduled a successor — every timeout permanently doubled the number of running poll chains, and each one issued its own requests. All SLIDER paths now schedule through a single timer that is cleared before it is replaced, so exactly one poll is ever pending. Chains that already multiplied collapse back to one at the next poll, without needing a restart.
+- **A failed image download no longer loses the slot**: the timestamp was marked as fetched before the download ran, and `downloadAndServe` reported neither success nor failure. If the image never arrived — validation failure, HTTP error, socket error, timeout, screen off, unwritable file — that image was skipped for good. The timestamp is now recorded only after the image has been written and handed to the frontend, so the next poll fetches the slot again.
+- **No config changes**: `sliderPollInterval` keeps the meaning it has in v3.4.0, and the static styles are untouched.
+- **Thanks** again to [@OberfragGER](https://github.com/OberfragGER), whose Pi-hole log in issue [#2](https://github.com/rkorell/MMM-Globe/issues/2) showed four to five requests per poll where there should have been two, which is what exposed the first defect.
+
 ### v3.4.0 — Configurable SLIDER poll interval (Oct 2026)
 
 - **New `sliderPollInterval` parameter**: Sets how often the CIRA SLIDER API is asked for a new image, for the SLIDER styles (`geoColorEurope`/`USA`/`Pacific`/`Asia` and the `meteosat` alias). Previously hardcoded to 60 seconds. Since SLIDER publishes a new image only every 10–15 minutes, a longer interval such as `15 * 60 * 1000` costs nothing in freshness and reduces outbound requests to the same external host. Defaults to the previous 60 seconds, so existing setups are unaffected.
