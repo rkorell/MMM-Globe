@@ -4,7 +4,8 @@
  *
  * Two polling modes:
  * - pollSlider (SLIDER styles: geoColorEurope/USA/Pacific/Asia, alias "meteosat"):
- *   polls CIRA SLIDER API every 60s, detects new images by comparing timestamps.
+ *   polls CIRA SLIDER API at configured sliderPollInterval (60s default and
+ *   minimum), detects new images by comparing timestamps.
  *   Supports four satellites: Meteosat-0deg, GOES-19, GOES-18, Himawari.
  * - pollStatic (all other styles + ownImagePath): polls at configured
  *   updateInterval.
@@ -20,6 +21,7 @@
  */
 // Modified: 2026-06-04 - Validate PNG/JPEG/GIF magic bytes, retry on validation failure (PSC-aware)
 // Modified: 2026-06-04 - Lazy-load static fallback index (only when first stale event triggers)
+// Modified: 2026-10-22 12:46 - Add sliderPollInterval config option, clamped to 60s minimum (issue #2)
 
 const NodeHelper = require("node_helper");
 const https = require("https");
@@ -38,7 +40,7 @@ const SLIDER_SATELLITES = {
   geoColorPacific: "goes-18",
   geoColorAsia:    "himawari"
 };
-const SLIDER_POLL_INTERVAL = 60 * 1000;
+const SLIDER_POLL_INTERVAL = 60 * 1000;  // default and minimum for config.sliderPollInterval
 const HTTP_TIMEOUT = 15 * 1000;       // timeout for JSON/small requests
 const HTTP_TIMEOUT_IMAGE = 30 * 1000; // timeout for image downloads
 const STALE_THRESHOLD_MS = 90 * 60 * 1000;  // 90 min — image older than this triggers fallback (Last-Modified)
@@ -151,7 +153,18 @@ module.exports = NodeHelper.create({
     if (satPath) {
       this.sliderSatPath = satPath;
       console.log("Started (mode: SLIDER/" + satPath + ", logLevel: " + config.logLevel + ")");
-      this.log("DEBUG", "SLIDER poll interval: " + (SLIDER_POLL_INTERVAL / 1000) + "s");
+
+      // Poll interval is configurable, but never below 60s — the SLIDER API is a
+      // third-party service and publishes a new image only every 10-15 minutes.
+      var pollInterval = Number(config.sliderPollInterval) || SLIDER_POLL_INTERVAL;
+      if (pollInterval < SLIDER_POLL_INTERVAL) {
+        this.log("WARN", "sliderPollInterval " + pollInterval + "ms is below the minimum, using "
+          + SLIDER_POLL_INTERVAL + "ms");
+        pollInterval = SLIDER_POLL_INTERVAL;
+      }
+      this.sliderPollInterval = pollInterval;
+
+      this.log("DEBUG", "SLIDER poll interval: " + (this.sliderPollInterval / 1000) + "s");
       this.pollSlider();
       return;
     }
@@ -323,7 +336,7 @@ module.exports = NodeHelper.create({
   },
 
   // --- SLIDER polling (geoColorEurope/USA/Pacific/Asia) ---
-  // Polls latest_times.json every 60s, detects new images by timestamp comparison.
+  // Polls latest_times.json at sliderPollInterval, detects new images by timestamp comparison.
 
   pollSlider: function() {
     var self = this;
@@ -341,7 +354,7 @@ module.exports = NodeHelper.create({
 
             if (ts === self.lastTimestamp) {
               self.log("DEBUG", "SLIDER poll: no new image (latest: " + ts + ")");
-              setTimeout(function() { self.pollSlider(); }, SLIDER_POLL_INTERVAL);
+              setTimeout(function() { self.pollSlider(); }, self.sliderPollInterval);
               return;
             }
 
@@ -358,7 +371,7 @@ module.exports = NodeHelper.create({
         } else {
           self.log("WARN", "SLIDER timestamp fetch failed (HTTP " + res.statusCode + ")");
         }
-        setTimeout(function() { self.pollSlider(); }, SLIDER_POLL_INTERVAL);
+        setTimeout(function() { self.pollSlider(); }, self.sliderPollInterval);
       });
     });
     req.on("error", function(e) {

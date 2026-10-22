@@ -83,6 +83,7 @@ Full configuration with all options:
         style: "europeDiscNat",           // satellite image style (see Available Styles)
         imageSize: 600,                   // display size in pixels
         updateInterval: 10 * 60 * 1000,   // poll interval for static styles (10 min)
+        sliderPollInterval: 60 * 1000,    // poll interval for SLIDER styles (60s, also the minimum)
         retryDelay: 30 * 1000,            // retry delay on failed SLIDER poll (30s)
         ownImagePath: "",                 // custom image URL (overrides style)
         enableImageSaving: false,         // save images to images/ subfolder
@@ -103,7 +104,8 @@ Full configuration with all options:
 |--------|-------------|
 | `style` | Image style. See [Available styles](#available-styles) below.<br>**Type:** `string` **Default:** `"geoColor"` |
 | `imageSize` | Size of the displayed image in pixels.<br>**Type:** `integer` **Default:** `600` |
-| `updateInterval` | How often the image is refreshed (in milliseconds). Not used for `meteosat` (which auto-polls every 60s and only updates when a new image is available).<br>**Default:** `10 * 60 * 1000` (10 minutes) |
+| `updateInterval` | How often the image is refreshed (in milliseconds). Not used for SLIDER styles (`geoColorEurope`/`USA`/`Pacific`/`Asia` and the `meteosat` alias), which poll at `sliderPollInterval` and only update when a new image is available.<br>**Default:** `10 * 60 * 1000` (10 minutes) |
+| `sliderPollInterval` | How often the CIRA SLIDER API is asked for a new image (in milliseconds). Only applies to SLIDER styles; static styles use `updateInterval`. SLIDER publishes a new image every 10–15 minutes, so a longer interval costs little — useful if you prefer fewer outbound requests to the same external host. Values below 60 seconds are rejected and clamped to the minimum (logged as a warning), since SLIDER is a third-party service.<br>**Type:** `integer` **Default:** `60 * 1000` (60 seconds, also the minimum) |
 | `ownImagePath` | URL to a custom image. Overrides `style` when set. Works with any image URL, including EUMETSAT WMS (see [below](#using-eumetsat-wms)).<br>**Default:** `""` |
 | `retryDelay` | Delay before retrying after a failed SLIDER API poll (milliseconds). For non-SLIDER styles, retries happen automatically at the next `updateInterval`.<br>**Default:** `30000` (30 seconds) |
 | `enableImageSaving` | Save each satellite image to the `images/` subfolder. For the `meteosat` style, files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`) and duplicates are skipped automatically. For other styles, files are named with the local download time and duplicate images are detected via content hash (identical images are not saved again).<br>**Type:** `boolean` **Default:** `false` |
@@ -120,7 +122,7 @@ Full configuration with all options:
 
 #### SLIDER styles (GeoColor with day/night visualization and city lights)
 
-These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and auto-poll every 60 seconds. They only download when a new image is available (typically every 10-15 minutes depending on the satellite).
+These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and auto-poll at `sliderPollInterval` (60 seconds by default). They only download when a new image is available (typically every 10-15 minutes depending on the satellite).
 
 | Style | Satellite | Region | Status |
 |-------|-----------|--------|--------|
@@ -300,7 +302,7 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 
 **Backend (`node_helper.js`)** — all image fetching runs server-side for consistent logging in pm2 and to avoid CORS issues. Three methods with clear responsibilities:
 
-- **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API every 60 seconds for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. On error or timeout, retries after `retryDelay`.
+- **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API at `sliderPollInterval` (60 seconds by default and at minimum) for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. On error or timeout, retries after `retryDelay`.
 - **`pollStatic`** (all other styles + `ownImagePath`): Triggers a download at each `updateInterval`. Covers all built-in styles (geoColor, natColor, airMass, fullBand, europeDisc*, centralAmericaDiscNat) as well as custom URLs via `ownImagePath`.
 - **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for meteosat and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains. For static styles with `switchToStaticIfStale` enabled, the `Last-Modified` HTTP header is checked before processing — if the image is older than 90 minutes, `serveStaticFallback` is called instead.
 - **`serveStaticFallback`** (stale image handler): Selects a time-appropriate image from the `static/` subfolder, optionally draws a dot marker via Python/Pillow subprocess, writes it to `current.png`, and sends it to the frontend with a `fallbackText` field for text markers. Called automatically when the live feed is detected as stale. When `archiveSunPhase` is configured, uses `mapToArchiveTime` for seasonal day/night adjustment.
@@ -309,6 +311,13 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 **Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` (static styles only — SLIDER styles have natural coastlines).
 
 ## What changed compared to the original?
+
+### v3.4.0 — Configurable SLIDER poll interval (Oct 2026)
+
+- **New `sliderPollInterval` parameter**: Sets how often the CIRA SLIDER API is asked for a new image, for the SLIDER styles (`geoColorEurope`/`USA`/`Pacific`/`Asia` and the `meteosat` alias). Previously hardcoded to 60 seconds. Since SLIDER publishes a new image only every 10–15 minutes, a longer interval such as `15 * 60 * 1000` costs nothing in freshness and reduces outbound requests to the same external host. Defaults to the previous 60 seconds, so existing setups are unaffected.
+- **Minimum enforced at 60 seconds**: Lower values are clamped to 60 s and logged as a warning. SLIDER is a free third-party service and should not be polled harder than before.
+- **Closes the gap to the static styles**: Those already took their cadence from `updateInterval`; the SLIDER path now has the same configurability.
+- **Thanks** to [@OberfragGER](https://github.com/OberfragGER) for reporting the missing option and supplying a working patch in issue [#2](https://github.com/rkorell/MMM-Globe/issues/2), which this release is based on.
 
 ### v3.3.0 — Configurable clip radius, footer overlay removed (Aug 2026)
 
@@ -359,7 +368,7 @@ Complete refactoring of the module's internal architecture. The frontend and bac
 - **Meteosat via CIRA SLIDER** (`style: "meteosat"`): Full-disk GeoColor imagery of Europe/Africa with day/night visualization
 - **EUMETSAT WMS support**: Use `ownImagePath` with WMS GetMap URLs in geostationary projection
 - **Image saving for all styles**: `enableImageSaving` works for all styles, not just meteosat
-- **Smart SLIDER polling**: Polls every 60s but only downloads when a genuinely new image is available
+- **Smart SLIDER polling**: Polls at a configurable interval (60s by default) but only downloads when a genuinely new image is available
 
 ### Bugfixes from the original module
 

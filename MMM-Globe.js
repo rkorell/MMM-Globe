@@ -7,6 +7,7 @@
  * Fork maintainer: Dr. Ralf Korell https://github.com/rkorell
  * MIT Licensed.
  */
+// Modified: 2026-10-22 12:46 - Add sliderPollInterval config option (issue #2)
 
 Module.register("MMM-Globe", {
   defaults: {
@@ -14,6 +15,7 @@ Module.register("MMM-Globe", {
     imageSize: 600,
     ownImagePath: "",
     updateInterval: 10 * 60 * 1000,  // 10 minutes
+    sliderPollInterval: 60 * 1000,   // poll interval for SLIDER styles (60 seconds, also the minimum)
     retryDelay: 30 * 1000,           // retry delay on load failure (30 seconds)
     enableImageSaving: false,         // save satellite images locally (images/ subfolder)
     coastlines: false,                // false, "europe", "americas", "asia"
@@ -39,6 +41,7 @@ Module.register("MMM-Globe", {
       imageSize: this.config.imageSize,
       ownImagePath: this.config.ownImagePath,
       updateInterval: this.config.updateInterval,
+      sliderPollInterval: this.config.sliderPollInterval,
       retryDelay: this.config.retryDelay,
       enableImageSaving: this.config.enableImageSaving,
       logLevel: this.config.logLevel,
