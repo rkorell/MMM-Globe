@@ -8,6 +8,7 @@
  * MIT Licensed.
  */
 // Modified: 2026-10-22 12:46 - Add sliderPollInterval config option (issue #2)
+// Modified: 2026-10-25 14:10 - Add syncDelay config option, sliderPollInterval default now 10 min
 
 Module.register("MMM-Globe", {
   defaults: {
@@ -15,7 +16,8 @@ Module.register("MMM-Globe", {
     imageSize: 600,
     ownImagePath: "",
     updateInterval: 10 * 60 * 1000,  // 10 minutes
-    sliderPollInterval: 60 * 1000,   // poll interval for SLIDER styles (60 seconds, also the minimum)
+    sliderPollInterval: 10 * 60 * 1000,  // SLIDER cadence (10 min; 15 min for meteosat-0deg), 60s minimum
+    syncDelay: 0,                    // >0 (ms): sync the polls to the publication grid, step size of the titration
     retryDelay: 30 * 1000,           // retry delay on load failure (30 seconds)
     enableImageSaving: false,         // save satellite images locally (images/ subfolder)
     coastlines: false,                // false, "europe", "americas", "asia"
@@ -42,6 +44,7 @@ Module.register("MMM-Globe", {
       ownImagePath: this.config.ownImagePath,
       updateInterval: this.config.updateInterval,
       sliderPollInterval: this.config.sliderPollInterval,
+      syncDelay: this.config.syncDelay,
       retryDelay: this.config.retryDelay,
       enableImageSaving: this.config.enableImageSaving,
       logLevel: this.config.logLevel,

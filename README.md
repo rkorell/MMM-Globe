@@ -83,7 +83,8 @@ Full configuration with all options:
         style: "europeDiscNat",           // satellite image style (see Available Styles)
         imageSize: 600,                   // display size in pixels
         updateInterval: 10 * 60 * 1000,   // poll interval for static styles (10 min)
-        sliderPollInterval: 60 * 1000,    // poll interval for SLIDER styles (60s, also the minimum)
+        sliderPollInterval: 10 * 60 * 1000, // SLIDER cadence (10 min; 15 min for meteosat-0deg)
+        syncDelay: 0,                     // >0 (ms): lock the polls onto the publication grid
         retryDelay: 30 * 1000,            // retry delay on failed SLIDER poll (30s)
         ownImagePath: "",                 // custom image URL (overrides style)
         enableImageSaving: false,         // save images to images/ subfolder
@@ -105,7 +106,8 @@ Full configuration with all options:
 | `style` | Image style. See [Available styles](#available-styles) below.<br>**Type:** `string` **Default:** `"geoColor"` |
 | `imageSize` | Size of the displayed image in pixels.<br>**Type:** `integer` **Default:** `600` |
 | `updateInterval` | How often the image is refreshed (in milliseconds). Not used for SLIDER styles (`geoColorEurope`/`USA`/`Pacific`/`Asia` and the `meteosat` alias), which poll at `sliderPollInterval` and only update when a new image is available.<br>**Default:** `10 * 60 * 1000` (10 minutes) |
-| `sliderPollInterval` | How often the CIRA SLIDER API is asked for a new image (in milliseconds). Only applies to SLIDER styles; static styles use `updateInterval`. SLIDER publishes a new image every 10–15 minutes, so a longer interval costs little — useful if you prefer fewer outbound requests to the same external host. Values below 60 seconds are rejected and clamped to the minimum (logged as a warning), since SLIDER is a third-party service.<br>**Type:** `integer` **Default:** `60 * 1000` (60 seconds, also the minimum) |
+| `sliderPollInterval` | How often the CIRA SLIDER API is asked for a new image (in milliseconds). Only applies to SLIDER styles; static styles use `updateInterval`. The value is read in two ways. Without `syncDelay` it is simply the poll rate, and the polls run free: a longer interval costs no images, but the one on screen can be up to one interval old, because the module cannot know when the satellite published it. With `syncDelay` set it is the **cadence of the satellite** and must match it exactly — 15 minutes for Meteosat (`geoColorEurope`), 10 minutes for the three others; a mismatch is reported and switches the sync off. Values below 60 seconds are rejected and clamped to the minimum (logged as a warning), since SLIDER is a third-party service.<br>**Type:** `integer` **Default:** `10 * 60 * 1000` (10 minutes; 60 seconds minimum) |
+| `syncDelay` | Locks the polls onto the publication grid of the service (in milliseconds). `0` turns it off. When set, the module titrates the unknown publication phase in steps of this size, and from then on polls once per slot, shortly after a new image appears — one or two `syncDelay` after publication instead of up to a full interval. It is also the step size for the up to three follow-up attempts when a slot is late or missing. Values below 60 seconds are raised to 60 seconds; a value at or above the cadence switches the sync off and is reported. See [Synchronising to the publication grid](#synchronising-to-the-publication-grid).<br>**Type:** `integer` **Default:** `0` (off) |
 | `ownImagePath` | URL to a custom image. Overrides `style` when set. Works with any image URL, including EUMETSAT WMS (see [below](#using-eumetsat-wms)).<br>**Default:** `""` |
 | `retryDelay` | Delay before retrying after a failed SLIDER API poll (milliseconds). For non-SLIDER styles, retries happen automatically at the next `updateInterval`.<br>**Default:** `30000` (30 seconds) |
 | `enableImageSaving` | Save each satellite image to the `images/` subfolder. For the `meteosat` style, files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`) and duplicates are skipped automatically. For other styles, files are named with the local download time and duplicate images are detected via content hash (identical images are not saved again).<br>**Type:** `boolean` **Default:** `false` |
@@ -122,15 +124,17 @@ Full configuration with all options:
 
 #### SLIDER styles (GeoColor with day/night visualization and city lights)
 
-These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and auto-poll at `sliderPollInterval` (60 seconds by default). They only download when a new image is available (typically every 10-15 minutes depending on the satellite).
+These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and poll at `sliderPollInterval` (10 minutes by default). They only download when a new image is available. The cadence column is measured, not assumed: over 99 gaps per satellite in `latest_times.json`, the gaps are these values to the second, with occasional single missing slots showing up as exactly double.
 
-| Style | Satellite | Region | Status |
-|-------|-----------|--------|--------|
-| `geoColorEurope` | Meteosat (0°) | Europe / Africa | **Active** |
-| `geoColorUSA` | GOES-19 (75.2°W) | North / South America | **Active** |
-| `geoColorPacific` | GOES-18 (137.0°W) | Pacific / West Americas | **Active** |
-| `geoColorAsia` | Himawari (140.7°E) | Asia / Australia | **Active** |
-| `meteosat` | *(alias for `geoColorEurope`)* | | **Active** |
+| Style | Satellite | Region | Cadence | Status |
+|-------|-----------|--------|---------|--------|
+| `geoColorEurope` | Meteosat (0°) | Europe / Africa | 15 min | **Active** |
+| `geoColorUSA` | GOES-19 (75.2°W) | North / South America | 10 min | **Active** |
+| `geoColorPacific` | GOES-18 (137.0°W) | Pacific / West Americas | 10 min | **Active** |
+| `geoColorAsia` | Himawari (140.7°E) | Asia / Australia | 10 min | **Active** |
+| `meteosat` | *(alias for `geoColorEurope`)* | | 15 min | **Active** |
+
+Set `sliderPollInterval` to the cadence of your satellite, and add `syncDelay` if you want the image as soon as it appears — see [Synchronising to the publication grid](#synchronising-to-the-publication-grid).
 
 #### Static styles (polled at `updateInterval`)
 
@@ -145,6 +149,43 @@ These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and au
 | `europeDiscSnow` | Meteosat MSG | Europe / Africa | EUMETSAT | **Unreliable** — same as `europeDiscNat` |
 
 **Note:** If you were using `europeDiscNat` or `europeDiscSnow`, consider switching to `geoColorEurope` — it provides the same Meteosat satellite view of Europe and Africa, with the bonus of a beautiful nighttime visualization. The old `meteosat` style name still works as an alias. If you prefer to keep `europeDiscNat` (which is back online as of April 2026 but unreliable), enable `switchToStaticIfStale: true` to automatically fall back to archive images during EUMETSAT outages.
+
+### Synchronising to the publication grid
+
+A satellite publishes on a fixed cadence, but the module has no way of knowing *where* in that cadence it currently is. Polling therefore starts wherever MagicMirror happened to start, and that phase is what decides how old the picture on your mirror is. Poll every minute and you are never more than a minute behind, at the price of 1440 requests a day for 96 images. Poll once per cadence and you make 96 requests — but the phase stands still, and if it happens to sit badly, every image reaches the mirror almost a full cadence late, for as long as the module runs.
+
+`syncDelay` removes that trade-off by finding the phase instead of guessing it.
+
+```js
+config: {
+    style: "geoColorEurope",
+    sliderPollInterval: 15 * 60 * 1000,  // the cadence of Meteosat
+    syncDelay: 60 * 1000                 // titrate the phase in 1-minute steps
+}
+```
+
+With that configuration the module behaves like this:
+
+| Time | What happens |
+|------|--------------|
+| 10:07 | Start. The list is fetched, the image is shown, the newest entry is noted as a reference. Its age is unknown, so it is not an event. |
+| 10:08 – 10:12 | Titration: the list is fetched once a minute, nothing has changed. |
+| 10:13 | The newest entry is a different one. This is the first observed publication, and the image is fetched. |
+| 10:14 | Grid origin: the moment it was found, plus `syncDelay` as a buffer. |
+| 10:29, 10:44, 10:59 … | One list request and one image per slot, nothing in between. |
+
+The picture is then one to two `syncDelay` old when it reaches the mirror, instead of up to a full interval — at one request per slot instead of fifteen. The grid is built purely from arrival times; the timestamp inside an entry is never read for it.
+
+If a slot is late or missing (which happens for 1–4 % of slots, and such a slot is never delivered afterwards), the module follows up three times at `syncDelay` and then waits for the next grid point. Neither the follow-ups nor any interface error move the grid — once found, origin and cadence stay put until the module restarts.
+
+The cadence is yours to set, and `sliderPollInterval` is where you set it. The module measures the gaps in the list only to check your value, and if the two disagree it says so and falls back to plain fixed-interval polling:
+
+```
+SLIDER sync: measured cadence 900s does not match sliderPollInterval 600s — sync
+disabled, polling at the configured interval. Set sliderPollInterval: 900 * 1000 to sync.
+```
+
+The same happens if the operator ever changes the publishing rate — the check runs on every list fetch, so a changed cadence is reported instead of silently producing a wrong grid.
 
 ### Using EUMETSAT WMS
 
@@ -284,7 +325,7 @@ Some upstream APIs (notably the EUMETSAT WMS GeoServer used via `ownImagePath`) 
 
 Since v3.2.2, MMM-Globe validates every downloaded response against known image signatures (PNG, JPEG, GIF) before writing it to disk. Invalid responses (XML, HTML error pages, empty bodies) are discarded — the frontend keeps showing the last valid image rather than a broken one. Failed responses do not corrupt the `current.png` file shown on the mirror.
 
-When a response fails validation, the module retries the request up to two times with backoff (30 s, then 90 s) within the same poll cycle. If all retries fail, a single line is emitted at WARN log level and the module waits for the next regular poll. Polling frequency itself is never reduced — your image archive (when `enableImageSaving` is on) continues to grow at the configured rate.
+When an image download fails, the module retries the request up to two times with backoff (30 s, then 90 s) within the same poll cycle. Since v3.5.0 this covers every kind of failure — an HTTP error status, a socket error and a timeout as well as an invalid body; before, only the invalid body was retried, and with a poll interval of ten minutes or more that silently cost a whole slot. If all retries fail, a single line is emitted at WARN log level and the module waits for the next regular poll. Polling frequency itself is never reduced — your image archive (when `enableImageSaving` is on) continues to grow at the configured rate.
 
 ## Optional integration with MMM-PresenceScreenControl
 
@@ -302,7 +343,7 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 
 **Backend (`node_helper.js`)** — all image fetching runs server-side for consistent logging in pm2 and to avoid CORS issues. Three methods with clear responsibilities:
 
-- **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API at `sliderPollInterval` (60 seconds by default and at minimum) for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. On error or timeout, retries after `retryDelay`.
+- **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API at `sliderPollInterval` (10 minutes by default, 60 seconds minimum) for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. With `syncDelay` set it runs on a grid instead of a fixed rate: titrate the publication phase in `syncDelay` steps, take the first observed change plus `syncDelay` as the grid origin, then poll at origin + n × cadence, with up to three follow-ups at `syncDelay` on an empty grid point (`scheduleNextSliderPoll`, `scheduleSyncedPoll`). The cadence is the configured interval, verified against the gaps in the list on every fetch (`measureCadence`, `verifyCadence`). Every interface error — HTTP status, unreadable JSON, socket error, timeout — is retried after `retryDelay`, never later than the next regular poll, and never moves the grid (`scheduleAfterSliderError`).
 - **`pollStatic`** (all other styles + `ownImagePath`): Triggers a download at each `updateInterval`. Covers all built-in styles (geoColor, natColor, airMass, fullBand, europeDisc*, centralAmericaDiscNat) as well as custom URLs via `ownImagePath`.
 - **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for meteosat and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains. For static styles with `switchToStaticIfStale` enabled, the `Last-Modified` HTTP header is checked before processing — if the image is older than 90 minutes, `serveStaticFallback` is called instead.
 - **`serveStaticFallback`** (stale image handler): Selects a time-appropriate image from the `static/` subfolder, optionally draws a dot marker via Python/Pillow subprocess, writes it to `current.png`, and sends it to the frontend with a `fallbackText` field for text markers. Called automatically when the live feed is detected as stale. When `archiveSunPhase` is configured, uses `mapToArchiveTime` for seasonal day/night adjustment.
@@ -311,6 +352,13 @@ The module uses a clean backend/frontend separation. The frontend knows nothing 
 **Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` (static styles only — SLIDER styles have natural coastlines).
 
 ## What changed compared to the original?
+
+### v3.5.0 — Sync to the publication grid (Oct 2026)
+
+- **New `syncDelay` parameter**: Locks the SLIDER polls onto the publication grid of the service. The module titrates the unknown phase in `syncDelay` steps, takes the first observed change plus `syncDelay` as the grid origin and then polls once per slot. The image reaches the mirror one to two `syncDelay` after publication, at one list request and one image per slot instead of one request per minute. Off by default. See [Synchronising to the publication grid](#synchronising-to-the-publication-grid).
+- **`sliderPollInterval` default is now `10 * 60 * 1000`** instead of 60 seconds. **If you have never set this option, your setup changes.** The 60 seconds only ever made sense as a brute-force substitute for knowing the phase: it polled fifteen times per image so that the newest one would never be more than a minute old. Ten minutes is the real cadence of GOES-19, GOES-18 and Himawari, and `geoColorEurope` wants `15 * 60 * 1000`. Without `syncDelay` the polls still run free, so an image can now be up to one interval old; for the three satellites whose cadence equals the new default, the phase even stands still and the delay stays wherever the start put it. Setting `syncDelay` removes that — it is the whole point of the pairing. Setups that already configure `sliderPollInterval` are unaffected.
+- **Every interface error is retried now**: An HTTP error status and unreadable JSON on the list request used to wait a full poll interval instead of `retryDelay`, and an HTTP error, socket error or timeout on the image download was not retried at all. With 60 second polling that was invisible; with ten or fifteen minutes it costs a whole slot. All of them now retry — the list after `retryDelay` and never later than the next regular poll, the image through the existing 30 s / 90 s chain. An interface error never consumes a follow-up step and never moves the grid.
+- **No new log noise**: the only new messages are ERROR lines for a configuration that cannot sync (cadence mismatch, `syncDelay` at or above the cadence) and the WARN of the existing clamp pattern. A missing slot is not logged.
 
 ### v3.4.1 — Two SLIDER polling defects (Oct 2026)
 

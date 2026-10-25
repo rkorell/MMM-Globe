@@ -4,11 +4,20 @@
  *
  * Two polling modes:
  * - pollSlider (SLIDER styles: geoColorEurope/USA/Pacific/Asia, alias "meteosat"):
- *   polls CIRA SLIDER API at configured sliderPollInterval (60s default and
- *   minimum), detects new images by comparing timestamps.
+ *   polls CIRA SLIDER API at configured sliderPollInterval (10 min default,
+ *   60s minimum), detects new images by comparing timestamps.
  *   Supports four satellites: Meteosat-0deg, GOES-19, GOES-18, Himawari.
  * - pollStatic (all other styles + ownImagePath): polls at configured
  *   updateInterval.
+ *
+ * Grid sync (syncDelay > 0, SLIDER styles only): the publication phase of the
+ * service is unknown at startup, so the module titrates it. The first list
+ * fetch is a reference only; from there the list is polled every syncDelay
+ * until the newest entry changes. That moment plus syncDelay is the grid
+ * origin, and every further poll happens at origin + n * cadence. The cadence
+ * is the user's sliderPollInterval; the gaps in the list are measured only to
+ * verify it. An empty grid point is followed up to three times at syncDelay
+ * and then skipped — neither follow-ups nor interface errors move the grid.
  *
  * Both modes call downloadAndServe() which downloads the image and writes
  * current.png for the frontend. When enableImageSaving is true, a
@@ -23,6 +32,7 @@
 // Modified: 2026-06-04 - Lazy-load static fallback index (only when first stale event triggers)
 // Modified: 2026-10-22 12:46 - Add sliderPollInterval config option, clamped to 60s minimum (issue #2)
 // Modified: 2026-10-22 23:40 - Single SLIDER poll timer; keep slot open when the image download fails (issue #2)
+// Modified: 2026-10-25 14:10 - Add syncDelay grid sync, raise sliderPollInterval default to 10 min, retry all interface errors
 
 const NodeHelper = require("node_helper");
 const https = require("https");
@@ -41,7 +51,9 @@ const SLIDER_SATELLITES = {
   geoColorPacific: "goes-18",
   geoColorAsia:    "himawari"
 };
-const SLIDER_POLL_INTERVAL = 60 * 1000;  // default and minimum for config.sliderPollInterval
+const SLIDER_POLL_INTERVAL = 10 * 60 * 1000;  // default for config.sliderPollInterval
+const SLIDER_MIN_INTERVAL = 60 * 1000;        // no two SLIDER requests are ever closer than this
+const SYNC_FOLLOWUP_STEPS = 3;                // follow-up attempts at syncDelay when a grid point is empty
 const HTTP_TIMEOUT = 15 * 1000;       // timeout for JSON/small requests
 const HTTP_TIMEOUT_IMAGE = 30 * 1000; // timeout for image downloads
 const STALE_THRESHOLD_MS = 90 * 60 * 1000;  // 90 min — image older than this triggers fallback (Last-Modified)
@@ -95,6 +107,11 @@ module.exports = NodeHelper.create({
   staticUrl: null,
   sliderSatPath: null,
   sliderTimer: null,   // the one pending SLIDER poll (see rescheduleSlider)
+  syncDelay: 0,             // 0 = grid sync off (default)
+  syncEnabled: false,       // sync armed and cadence verified
+  syncRefTimestamp: null,   // newest list entry seen at the previous fetch
+  syncOrigin: 0,            // grid origin (epoch ms); 0 = still titrating
+  syncFollowUps: 0,         // follow-up attempts spent on the current grid point
   logLevel: 0,
   imagesDir: null,
   staleFallbackActive: false,
@@ -159,14 +176,35 @@ module.exports = NodeHelper.create({
       // Poll interval is configurable, but never below 60s — the SLIDER API is a
       // third-party service and publishes a new image only every 10-15 minutes.
       var pollInterval = Number(config.sliderPollInterval) || SLIDER_POLL_INTERVAL;
-      if (pollInterval < SLIDER_POLL_INTERVAL) {
+      if (pollInterval < SLIDER_MIN_INTERVAL) {
         this.log("WARN", "sliderPollInterval " + pollInterval + "ms is below the minimum, using "
-          + SLIDER_POLL_INTERVAL + "ms");
-        pollInterval = SLIDER_POLL_INTERVAL;
+          + SLIDER_MIN_INTERVAL + "ms");
+        pollInterval = SLIDER_MIN_INTERVAL;
       }
       this.sliderPollInterval = pollInterval;
 
-      this.log("DEBUG", "SLIDER poll interval: " + (this.sliderPollInterval / 1000) + "s");
+      // Grid sync: syncDelay is both the titration step and the follow-up step.
+      // It never falls below the 60s floor that applies to every SLIDER request,
+      // and a value at or above the cadence would skip whole slots.
+      var syncDelay = Number(config.syncDelay) || 0;
+      if (syncDelay > 0 && syncDelay < SLIDER_MIN_INTERVAL) {
+        this.log("WARN", "syncDelay " + syncDelay + "ms is below the minimum, using "
+          + SLIDER_MIN_INTERVAL + "ms");
+        syncDelay = SLIDER_MIN_INTERVAL;
+      }
+      if (syncDelay >= pollInterval) {
+        if (syncDelay > 0) {
+          this.log("ERROR", "syncDelay " + (syncDelay / 1000) + "s must be smaller than"
+            + " sliderPollInterval " + (pollInterval / 1000) + "s — sync disabled,"
+            + " polling at the configured interval");
+        }
+        syncDelay = 0;
+      }
+      this.syncDelay = syncDelay;
+      this.syncEnabled = syncDelay > 0;
+
+      this.log("DEBUG", "SLIDER poll interval: " + (this.sliderPollInterval / 1000) + "s"
+        + (this.syncEnabled ? ", grid sync with " + (this.syncDelay / 1000) + "s steps" : ""));
       this.pollSlider();
       return;
     }
@@ -352,6 +390,111 @@ module.exports = NodeHelper.create({
     this.sliderTimer = setTimeout(function() { self.pollSlider(); }, delay);
   },
 
+  // A SLIDER timestamp (YYYYMMDDHHMMSS) as epoch milliseconds, NaN if malformed.
+  // Used for measuring gaps only — the grid itself is built from arrival times,
+  // never from the capture time an entry carries.
+  parseSliderTimestamp: function(ts) {
+    var s = String(ts);
+    if (!/^\d{14}$/.test(s)) return NaN;
+    return Date.UTC(
+      Number(s.substring(0, 4)), Number(s.substring(4, 6)) - 1, Number(s.substring(6, 8)),
+      Number(s.substring(8, 10)), Number(s.substring(10, 12)), Number(s.substring(12, 14))
+    );
+  },
+
+  // Most frequent gap between consecutive list entries, in milliseconds.
+  // Not the minimum and not the median: single missing slots show up as double
+  // gaps and would skew both. Returns 0 when the list is too short to judge.
+  measureCadence: function(timestamps) {
+    if (!Array.isArray(timestamps) || timestamps.length < 3) return 0;
+    var counts = {};
+    var best = 0;
+    var bestCount = 0;
+    for (var i = 0; i < timestamps.length - 1; i++) {
+      var gap = this.parseSliderTimestamp(timestamps[i]) - this.parseSliderTimestamp(timestamps[i + 1]);
+      if (!(gap > 0)) continue;
+      counts[gap] = (counts[gap] || 0) + 1;
+      if (counts[gap] > bestCount) {
+        bestCount = counts[gap];
+        best = gap;
+      }
+    }
+    return best;
+  },
+
+  // The cadence comes from the user via sliderPollInterval; the list is only
+  // consulted to verify it. A mismatch means the configured value is wrong or
+  // the operator changed the publishing rate — either way the grid would be
+  // wrong, so sync is dropped and the module falls back to fixed polling.
+  // Runs on every successful list fetch while sync is on, which makes the
+  // error appear exactly once.
+  verifyCadence: function(timestamps) {
+    var cadence = this.measureCadence(timestamps);
+    if (cadence === 0 || cadence === this.sliderPollInterval) return;
+    this.log("ERROR", "SLIDER sync: measured cadence " + (cadence / 1000) + "s does not match"
+      + " sliderPollInterval " + (this.sliderPollInterval / 1000) + "s — sync disabled, polling at"
+      + " the configured interval. Set sliderPollInterval: " + (cadence / 1000) + " * 1000 to sync.");
+    this.syncEnabled = false;
+    this.syncOrigin = 0;
+  },
+
+  // Next grid point strictly after now: origin + n * cadence, n >= 1. Computed
+  // absolutely rather than by adding up delays, so timer drift, load spikes and
+  // suspend cannot accumulate.
+  scheduleSyncedPoll: function() {
+    this.rescheduleSlider(this.msToNextGridPoint());
+  },
+
+  // Milliseconds until the next regular poll: the next grid point while the
+  // grid is locked, one plain interval otherwise.
+  msToNextGridPoint: function() {
+    if (!this.syncEnabled || this.syncOrigin === 0) return this.sliderPollInterval;
+    var now = Date.now();
+    var n = Math.floor((now - this.syncOrigin) / this.sliderPollInterval) + 1;
+    if (n < 1) n = 1;
+    return this.syncOrigin + n * this.sliderPollInterval - now;
+  },
+
+  // Plan the successor of a completed poll. changed tells whether the newest
+  // list entry differs from the one seen at the previous fetch.
+  scheduleNextSliderPoll: function(changed) {
+    if (!this.syncEnabled) {
+      this.rescheduleSlider(this.sliderPollInterval);
+      return;
+    }
+    if (this.syncOrigin === 0) {
+      // Titrating: step forward until the first change shows up.
+      if (!changed) {
+        this.rescheduleSlider(this.syncDelay);
+        return;
+      }
+      this.syncOrigin = Date.now() + this.syncDelay;
+      this.log("DEBUG", "SLIDER sync: grid locked, cadence " + (this.sliderPollInterval / 1000)
+        + "s, buffer " + (this.syncDelay / 1000) + "s");
+      this.scheduleSyncedPoll();
+      return;
+    }
+    if (changed || this.syncFollowUps >= SYNC_FOLLOWUP_STEPS) {
+      // Found it, or the slot stays empty: either way on to the next grid point.
+      // The follow-ups are error handling, they never move the grid.
+      this.syncFollowUps = 0;
+      this.scheduleSyncedPoll();
+      return;
+    }
+    this.syncFollowUps++;
+    this.rescheduleSlider(this.syncDelay);
+  },
+
+  // An interface error says nothing about whether a new image exists: it costs
+  // no follow-up step and never moves the grid. Retried after retryDelay, but
+  // never later than the next regular poll — when the grid point is closer than
+  // the retry, the grid wins. Stateless on purpose: the timeout handler calls
+  // req.destroy(), which emits an additional error event, and both compute the
+  // same delay, so the single timer of rescheduleSlider absorbs the duplicate.
+  scheduleAfterSliderError: function() {
+    this.rescheduleSlider(Math.min(this.config.retryDelay, this.msToNextGridPoint()));
+  },
+
   pollSlider: function() {
     var self = this;
     var satPath = this.sliderSatPath;
@@ -361,49 +504,66 @@ module.exports = NodeHelper.create({
       var data = "";
       res.on("data", function(chunk) { data += chunk; });
       res.on("end", function() {
-        if (res.statusCode === 200) {
-          try {
-            var json = JSON.parse(data);
-            var ts = json.timestamps_int[0].toString();
-
-            if (ts === self.lastTimestamp) {
-              self.log("DEBUG", "SLIDER poll: no new image (latest: " + ts + ")");
-              self.rescheduleSlider(self.sliderPollInterval);
-              return;
-            }
-
-            var dateStr = ts.substring(0, 4) + "/" + ts.substring(4, 6) + "/" + ts.substring(6, 8);
-            var imageUrl = SLIDER_BASE_URL + "/data/imagery/"
-              + dateStr + "/" + satPath + "---" + SLIDER_PRODUCT + "/" + ts + "/00/000_000.png";
-
-            self.log("INFO", "New SLIDER image: " + ts);
-
-            // Plan the next poll before the download, so the chain never depends
-            // on it finishing. The timestamp is only marked as done once the image
-            // has actually arrived — a failed download therefore leaves the slot
-            // open and the next poll fetches it again instead of skipping it.
-            self.rescheduleSlider(self.sliderPollInterval);
-            self.downloadAndServe(imageUrl, "globe_" + ts + ".png", 0, function() {
-              self.lastTimestamp = ts;
-            });
-            return;
-          } catch (e) {
-            self.log("ERROR", "SLIDER JSON parse error: " + e.message);
-          }
-        } else {
+        var json;
+        var ts;
+        if (res.statusCode !== 200) {
           self.log("WARN", "SLIDER timestamp fetch failed (HTTP " + res.statusCode + ")");
+          self.scheduleAfterSliderError();
+          return;
         }
-        self.rescheduleSlider(self.sliderPollInterval);
+        try {
+          json = JSON.parse(data);
+          ts = json.timestamps_int[0].toString();
+        } catch (e) {
+          self.log("ERROR", "SLIDER JSON parse error: " + e.message);
+          self.scheduleAfterSliderError();
+          return;
+        }
+        if (self.syncEnabled) {
+          self.verifyCadence(json.timestamps_int);
+        }
+
+        // Did something new appear since the previous fetch? The very first
+        // fetch only sets the reference — when its entry showed up is unknown,
+        // so it is no event. Tracked separately from lastTimestamp so that a
+        // failed image download leaves the slot open without moving the grid.
+        var changed = false;
+        if (self.syncRefTimestamp === null) {
+          self.syncRefTimestamp = ts;
+        } else if (ts !== self.syncRefTimestamp) {
+          self.syncRefTimestamp = ts;
+          changed = true;
+        }
+
+        // Plan the next poll before the download, so the chain never depends
+        // on it finishing. The timestamp is only marked as done once the image
+        // has actually arrived — a failed download therefore leaves the slot
+        // open and the next poll fetches it again instead of skipping it.
+        self.scheduleNextSliderPoll(changed);
+
+        if (ts === self.lastTimestamp) {
+          self.log("DEBUG", "SLIDER poll: no new image (latest: " + ts + ")");
+          return;
+        }
+
+        var dateStr = ts.substring(0, 4) + "/" + ts.substring(4, 6) + "/" + ts.substring(6, 8);
+        var imageUrl = SLIDER_BASE_URL + "/data/imagery/"
+          + dateStr + "/" + satPath + "---" + SLIDER_PRODUCT + "/" + ts + "/00/000_000.png";
+
+        self.log("INFO", "New SLIDER image: " + ts);
+        self.downloadAndServe(imageUrl, "globe_" + ts + ".png", 0, function() {
+          self.lastTimestamp = ts;
+        });
       });
     });
     req.on("error", function(e) {
       self.log("ERROR", "SLIDER fetch error: " + e.message);
-      self.rescheduleSlider(self.config.retryDelay);
+      self.scheduleAfterSliderError();
     });
     req.setTimeout(HTTP_TIMEOUT, function() {
       req.destroy();
       self.log("WARN", "SLIDER timestamp fetch timeout");
-      self.rescheduleSlider(self.config.retryDelay);
+      self.scheduleAfterSliderError();
     });
   },
 
@@ -472,23 +632,7 @@ module.exports = NodeHelper.create({
             self.log("DEBUG",
               "Validation failed for " + imageUrl
               + " (size: " + buffer.length + " bytes, first 16 hex: " + preview + ")");
-
-            if (!self.screenOn) {
-              self.log("DEBUG", "Skipping retry: screen off");
-              return;
-            }
-            if (retryAttempt >= RETRY_MAX) {
-              self.log("WARN",
-                "Failed to get valid image from " + imageUrl
-                + " after " + RETRY_MAX + " retries");
-              return;
-            }
-
-            var delay = RETRY_DELAYS_MS[retryAttempt];
-            self.log("DEBUG", "Retrying in " + (delay / 1000) + "s (" + (retryAttempt + 1) + "/" + RETRY_MAX + ")");
-            setTimeout(function() {
-              self.downloadAndServe(imageUrl, filename, retryAttempt + 1, onSuccess);
-            }, delay);
+            self.retryImage(imageUrl, filename, retryAttempt, onSuccess);
             return;
           }
 
@@ -577,15 +721,42 @@ module.exports = NodeHelper.create({
         });
       } else {
         self.log("WARN", "Image fetch failed (HTTP " + res.statusCode + ")");
+        res.resume(); // Drain response to free socket
+        self.retryImage(imageUrl, filename, retryAttempt, onSuccess);
       }
     });
     req.on("error", function(e) {
       self.log("ERROR", "Image fetch error: " + e.message);
+      self.retryImage(imageUrl, filename, retryAttempt, onSuccess);
     });
     req.setTimeout(HTTP_TIMEOUT_IMAGE, function() {
       req.destroy();
       self.log("WARN", "Image fetch timeout");
+      self.retryImage(imageUrl, filename, retryAttempt, onSuccess);
     });
+  },
+
+  // Retry chain for a failed image download: 30s, then 90s, then give up and
+  // leave the slot to the next poll. Suppressed while the screen is off (PSC).
+  // Used for every kind of failure — invalid content as well as HTTP, socket
+  // and timeout errors; before v3.5.0 only invalid content was retried, which
+  // cost a whole slot once the poll interval grew beyond a minute.
+  retryImage: function(imageUrl, filename, retryAttempt, onSuccess) {
+    var self = this;
+    if (!this.screenOn) {
+      this.log("DEBUG", "Skipping retry: screen off");
+      return;
+    }
+    if (retryAttempt >= RETRY_MAX) {
+      this.log("WARN", "Failed to get valid image from " + imageUrl
+        + " after " + RETRY_MAX + " retries");
+      return;
+    }
+    var delay = RETRY_DELAYS_MS[retryAttempt];
+    this.log("DEBUG", "Retrying in " + (delay / 1000) + "s (" + (retryAttempt + 1) + "/" + RETRY_MAX + ")");
+    setTimeout(function() {
+      self.downloadAndServe(imageUrl, filename, retryAttempt + 1, onSuccess);
+    }, delay);
   },
 
   // Determine file extension from URL (supports both direct URLs and WMS format= parameter)
