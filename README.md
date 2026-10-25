@@ -174,9 +174,11 @@ With that configuration the module behaves like this:
 | 10:14 | Grid origin: the moment it was found, plus `syncDelay` as a buffer. |
 | 10:29, 10:44, 10:59 … | One list request and one image per slot, nothing in between. |
 
-The picture is then one to two `syncDelay` old when it reaches the mirror, instead of up to a full interval — at one request per slot instead of fifteen. The grid is built purely from arrival times; the timestamp inside an entry is never read for it.
+The picture is then one to two `syncDelay` old when it reaches the mirror, instead of up to a full interval — at one request per slot instead of fifteen.
 
-If a slot is late or missing (which happens for 1–4 % of slots, and such a slot is never delivered afterwards), the module follows up three times at `syncDelay` and then waits for the next grid point. Neither the follow-ups nor any interface error move the grid — once found, origin and cadence stay put until the module restarts.
+The grid is built purely from arrival times. The capture timestamp an entry carries is never read for it, and that is deliberate: between capture and availability sits a processing delay of roughly 45 minutes for Meteosat and 24 for the GOES satellites, and it is not constant. What *is* constant is the distance between two arrivals, and that distance is the cadence — so the arrival is the only thing worth measuring.
+
+If a slot is late or missing, the module follows up three times at `syncDelay` and then waits for the next grid point. Missing slots are not rare enough to ignore and not frequent enough to worry about: 1 to 4 % of them, always single ones, showing up in the list as exactly one doubled gap. And they are never delivered afterwards — a slot that has not arrived by the time the next one does is gone for good, which is why the module stops asking after three attempts instead of chasing it. Neither the follow-ups nor any interface error move the grid; once found, origin and cadence stay put until the module restarts.
 
 The cadence is yours to set, and `sliderPollInterval` is where you set it. The module measures the gaps in the list only to check your value, and if the two disagree it says so and falls back to plain fixed-interval polling:
 
@@ -214,6 +216,14 @@ Some useful WMS layers:
 | `mtg_fd:rgb_truecolour` | MTG True Colour (full disk) |
 
 The `msg_fes` layers update every 15 minutes, `mtg_fd` layers every 10 minutes. Set `updateInterval` accordingly.
+
+**The WMS tells you which slot it is serving.** Every GetMap response carries a header naming the nominal time of the image you just received:
+
+```
+warning: 99 Default value used: time=2026-10-25T11:15:00.000Z ISO8601 (msg_fes:rgb_naturalenhncd)
+```
+
+That is worth knowing for two reasons. It lets you see how far behind the live feed actually runs — at 11:37 UTC the server above was still serving the 11:15 slot. And the same header comes back for a request with `width=1&height=1`, which costs **70 bytes instead of 600 KB** while naming the identical slot. So for WMS sources there is a cheap way to ask "is there anything new yet" without downloading a picture to find out — the equivalent of what `latest_times.json` is for the SLIDER styles. The module does not use this yet; `syncDelay` currently applies to the SLIDER styles only.
 
 ### Coastline underlay
 
