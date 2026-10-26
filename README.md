@@ -4,6 +4,14 @@ A module for [MagicMirror²](https://github.com/MagicMirrorOrg/MagicMirror) that
 
 > Fork of [LukeSkywalker92/MMM-Globe](https://github.com/LukeSkywalker92/MMM-Globe), originally created by [Luke Scheffler](https://github.com/LukeSkywalker92). His elegant idea of using CSS `clip-path: circle()` to turn square satellite images into a globe is the heart of this module. Thank you, Luke!
 
+This file is ordered by what you are here for:
+
+- **Setting it up** — [Installation](#installation), [Update](#update), [Configuration](#configuration), [Available styles](#available-styles), [MMM-PresenceScreenControl](#optional-integration-with-mmm-presencescreencontrol)
+- **Running it** — [Synchronising to the publication grid](#synchronising-to-the-publication-grid), [Using EUMETSAT WMS](#using-eumetsat-wms), [Coastline underlay](#coastline-underlay), [Static fallback for stale images](#static-fallback-for-stale-images), [Reliability & error handling](#reliability--error-handling)
+- **How it works inside** — [Architecture](#architecture), [Technical notes](#technical-notes)
+
+The version history lives in [CHANGELOG.md](CHANGELOG.md).
+
 ## Preview
 
 ![](https://github.com/rkorell/MMM-Globe/blob/master/screenshot.png?raw=true)
@@ -16,13 +24,15 @@ A module for [MagicMirror²](https://github.com/MagicMirrorOrg/MagicMirror) that
 
 ## Background: Why this fork?
 
-The original MMM-Globe module has been unmaintained since 2021 but worked perfectly fine for years — until February 2026, when EUMETSAT discontinued their static image server at `eumetview.eumetsat.int`. This broke the European satellite styles (`europeDiscNat`, `europeDiscSnow`) that many European MagicMirror users relied on.
+The original MMM-Globe module has been unmaintained since 2021 but worked perfectly fine for years — until February 2026, when EUMETSAT discontinued their static image server at `eumetview.eumetsat.int`. This broke the European satellite styles (`europeDiscNat`, `europeDiscSnow`) that many European MagicMirror users relied on. Those URLs came back in April 2026 and are, as of October 2026, gone again — see [Available styles](#available-styles) for what is measured and what to use instead.
 
 EUMETSAT migrated to a new dynamic platform at `view.eumetsat.int`, but this is a JavaScript web application — there are no static image URLs to point the module at. EUMETSAT does however offer a **WMS (Web Map Service)** endpoint that can deliver satellite images in geostationary projection — perfect for globe display (see [Using EUMETSAT WMS](#using-eumetsat-wms) below).
 
 Additionally, the **CIRA SLIDER** service operated by [NOAA/RAMMB](https://rammb2.cira.colostate.edu/) at Colorado State University provides Meteosat full-disk imagery as PNG tiles, including the excellent **GeoColor** product — natural color during the day and city lights on a Blue Marble background at night. This makes for a particularly stunning globe display around sunrise and sunset.
 
 This fork adds both options, plus a coastline/border overlay, image saving, configurable logging, and numerous bugfixes. The architecture has been completely refactored in v3.0.0: all image fetching now runs server-side in the node_helper, the frontend is a pure display layer, and all styles share a single download pipeline.
+
+---
 
 ## Installation
 
@@ -32,7 +42,7 @@ cd ~/MagicMirror/modules
 git clone https://github.com/rkorell/MMM-Globe.git
 ```
 
-No npm dependencies are needed — the module uses only Node.js built-in modules.
+The module uses Node.js built-in modules plus **`suncalc`**, which it needs for the [seasonal sun phase adjustment](#seasonal-sun-phase-adjustment). `suncalc` is not declared in this module's `package.json`; it currently resolves from MagicMirror's own `node_modules`, because MagicMirror lists it as a dependency of its own. On a normal MagicMirror installation nothing else is required. If your setup does not provide it (a non-hoisting package manager, or MagicMirror dropping the dependency), the module's backend fails to load and the globe stays empty with a single `Error when loading MMM-Globe` line in the pm2 log; installing `suncalc` in the module folder fixes that.
 
 **Optional:** The dot marker for the [static fallback](#static-fallback-for-stale-images) feature requires Python 3 with Pillow. Pillow is pre-installed on Raspberry Pi OS. On other systems:
 ```bash
@@ -48,7 +58,7 @@ To update the module to the latest version, navigate into the module folder and 
 cd ~/MagicMirror/modules/MMM-Globe
 git pull
 ```
-The module uses only Node.js built-in modules, so no `npm install` is required after updating.
+No `npm install` is needed — unless a release says so, which only happens when `package.json` or `package-lock.json` changed. In that case the order is: `rm -rf node_modules`, then `git pull`, then `npm install`.
 
 ## Configuration
 
@@ -81,16 +91,17 @@ Full configuration with all options:
     position: "lower_third",
     config: {
         style: "europeDiscNat",           // satellite image style (see Available Styles)
-        imageSize: 600,                   // display size in pixels
+        imageSize: 600,                   // display size in pixels; >800 also switches to the hi-res source
         updateInterval: 10 * 60 * 1000,   // poll interval for static styles (10 min)
         sliderPollInterval: 10 * 60 * 1000, // SLIDER cadence (10 min; 15 min for meteosat-0deg)
         syncDelay: 0,                     // >0 (ms): lock the polls onto the publication grid
-        retryDelay: 30 * 1000,            // retry delay on failed SLIDER poll (30s)
-        ownImagePath: "",                 // custom image URL (overrides style)
+        retryDelay: 30 * 1000,            // retry delay on failed SLIDER list request (30s)
+        ownImagePath: "",                 // custom image URL (overrides style, except for SLIDER styles)
         enableImageSaving: false,         // save images to images/ subfolder
         coastlines: "europe",             // coastline overlay: false, "europe", "americas", "asia"
+        clipRadius: null,                 // null = per-style default; number = clip radius in percent
         logLevel: "ERROR",                // "ERROR", "WARN", "INFO", "DEBUG"
-        switchToStaticIfStale: true,      // show archive images when live feed is stale (>90min)
+        switchToStaticIfStale: true,      // show archive images when the live feed goes stale
         staleFallbackMarker: "330:75:4:cornflowerblue",  // "off", "X:Y:Px:Color", or text label
         archiveSunPhase: "0730:1830",     // sunrise:sunset UTC of archive images (seasonal adjust)
         lat: 52.52,                       // mirror location latitude (for seasonal adjustment)
@@ -104,27 +115,27 @@ Full configuration with all options:
 | Option | Description |
 |--------|-------------|
 | `style` | Image style. See [Available styles](#available-styles) below.<br>**Type:** `string` **Default:** `"geoColor"` |
-| `imageSize` | Size of the displayed image in pixels.<br>**Type:** `integer` **Default:** `600` |
-| `updateInterval` | How often the image is refreshed (in milliseconds). Not used for SLIDER styles (`geoColorEurope`/`USA`/`Pacific`/`Asia` and the `meteosat` alias), which poll at `sliderPollInterval` and only update when a new image is available.<br>**Default:** `10 * 60 * 1000` (10 minutes) |
-| `sliderPollInterval` | How often the CIRA SLIDER API is asked for a new image (in milliseconds). Only applies to SLIDER styles; static styles use `updateInterval`. The value is read in two ways. Without `syncDelay` it is simply the poll rate, and the polls run free: a longer interval costs no images, but the one on screen can be up to one interval old, because the module cannot know when the satellite published it. With `syncDelay` set it is the **cadence of the satellite** and must match it exactly — 15 minutes for Meteosat (`geoColorEurope`), 10 minutes for the three others; a mismatch is reported and switches the sync off. Values below 60 seconds are rejected and clamped to the minimum (logged as a warning), since SLIDER is a third-party service.<br>**Type:** `integer` **Default:** `10 * 60 * 1000` (10 minutes; 60 seconds minimum) |
+| `imageSize` | Size of the displayed image in pixels. **A value above 800 also switches the download to the hi-res source** for the Himawari-8 and `centralAmericaDiscNat` styles — for `natColor` that is 36.8 MB per poll instead of 257 KB (measured 2026-10-26). `fullBand`, `europeDiscNat` and `europeDiscSnow` have no separate hi-res URL, so the value only affects their display size.<br>**Type:** `integer` **Default:** `600` |
+| `updateInterval` | How often the image is refreshed (in milliseconds). Not used for SLIDER styles (`geoColorEurope`/`USA`/`Pacific`/`Asia` and the `meteosat` alias), which poll at `sliderPollInterval` and only update when a new image is available.<br>**Type:** `integer` **Default:** `10 * 60 * 1000` (10 minutes) |
+| `sliderPollInterval` | How often the CIRA SLIDER API is asked for a new image (in milliseconds). Only applies to SLIDER styles; static styles use `updateInterval`. The value is read in two ways. Without `syncDelay` it is simply the poll rate, and the polls run free: a longer interval costs no images, but the one on screen can be up to one interval old, because the module cannot know when the satellite published it. With `syncDelay` set it is the **cadence of the satellite** and must match it exactly (see the cadence column under [Available styles](#available-styles)); a mismatch is reported and switches the sync off. Values below 60 seconds are rejected and clamped to the minimum (logged as a warning), since SLIDER is a third-party service.<br>**Type:** `integer` **Default:** `10 * 60 * 1000` (10 minutes; 60 seconds minimum) |
 | `syncDelay` | Locks the polls onto the publication grid of the service (in milliseconds). `0` turns it off. When set, the module titrates the unknown publication phase in steps of this size, and from then on polls once per slot, shortly after a new image appears — one or two `syncDelay` after publication instead of up to a full interval. It is also the step size for the up to three follow-up attempts when a slot is late or missing. Values below 60 seconds are raised to 60 seconds; a value at or above the cadence switches the sync off and is reported. See [Synchronising to the publication grid](#synchronising-to-the-publication-grid).<br>**Type:** `integer` **Default:** `0` (off) |
-| `ownImagePath` | URL to a custom image. Overrides `style` when set. Works with any image URL, including EUMETSAT WMS (see [below](#using-eumetsat-wms)).<br>**Default:** `""` |
-| `retryDelay` | Delay before retrying after a failed SLIDER API poll (milliseconds). For non-SLIDER styles, retries happen automatically at the next `updateInterval`.<br>**Default:** `30000` (30 seconds) |
-| `enableImageSaving` | Save each satellite image to the `images/` subfolder. For the `meteosat` style, files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`) and duplicates are skipped automatically. For other styles, files are named with the local download time and duplicate images are detected via content hash (identical images are not saved again).<br>**Type:** `boolean` **Default:** `false` |
-| `coastlines` | Show a coastline and country border underlay beneath the satellite image. **Only applies to static styles** — SLIDER styles (geoColor*) already have natural coastlines in the GeoColor imagery. The underlay is subtle (semi-transparent white lines on black) and only visible where the satellite image is dark (night side), thanks to CSS `mix-blend-mode: lighten`. Choose the projection matching your satellite view.<br>**Values:** `false` (off), `"europe"` (0° longitude), `"americas"` (-75.2° longitude), `"asia"` (140.7° longitude)<br>**Default:** `false` |
-| `clipRadius` | Override the circular clip radius (in percent) of the displayed globe. Leave at `null` to keep the per-style default (50%, or 44% for `centralAmericaDiscNat`). Set a smaller value to crop away an unwanted image border or footer on **any** background — for example, EUMETSAT WMS images carry a footer bar (logo + timestamp) at the bottom that `clipRadius: 48.55` removes cleanly. The override also applies to the `coastlines` underlay so it stays aligned with the cropped image. Because a custom `ownImagePath` cannot be identified as EUMETSAT, this is opt-in per module instance rather than automatic.<br>**Type:** `number` (or `null`) **Default:** `null` |
-| `logLevel` | Controls logging verbosity in pm2 logs. `"ERROR"`: only errors. `"WARN"`: adds warnings (e.g., failed fetches). `"INFO"`: adds new images and saves. `"DEBUG"`: adds poll activity, startup details, and duplicate detection.<br>**Values:** `"ERROR"`, `"WARN"`, `"INFO"`, `"DEBUG"` **Default:** `"ERROR"` |
-| `switchToStaticIfStale` | When `true`, automatically switches to pre-rendered static fallback images if the live satellite feed has not updated for 90 minutes. Only applies to static styles (`europeDiscNat`, `ownImagePath`, etc.), not SLIDER styles. See [Static Fallback for Stale Images](#static-fallback-for-stale-images) below.<br>**Type:** `boolean` **Default:** `false` |
-| `staleFallbackMarker` | Visual marker to indicate archive mode on fallback images. Three formats:<br>• `"off"` — no marker<br>• `"X:Y"` or `"X:Y:Px"` or `"X:Y:Px:Color"` — draws a dot at pixel position X,Y with optional size (default 4px) and color (default `cornflowerblue`). Rendered server-side via Python/Pillow. Example: `"330:75:4:cornflowerblue"` places a subtle dot on Germany.<br>• Any other text (e.g. `"Archivbild"`) — displays the text as a small label below the globe. Rendered as a DOM element, no additional dependencies needed.<br>**Default:** `"330:75:4:cornflowerblue"` |
-| `archiveSunPhase` | Sunrise and sunset times (UTC) of the archive images, determined by visual inspection. Format: `"HHMM:HHMM"`, e.g. `"0730:1830"`. When set, the module adjusts archive image selection to compensate for seasonal daylight differences between the archive date and today. Requires `lat`/`lon` to be set. Leave empty to disable (direct UTC matching).<br>**Type:** `string` **Default:** `""` |
-| `lat` | Mirror location latitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation.<br>**Type:** `number` **Default:** `52.52` (Berlin) |
-| `lon` | Mirror location longitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation.<br>**Type:** `number` **Default:** `13.405` (Berlin) |
+| `ownImagePath` | URL to a custom image. Overrides `style` for all static styles. **It does not override the SLIDER styles** (`geoColorEurope`/`USA`/`Pacific`/`Asia`, `meteosat`): if one of those is configured, the module polls SLIDER and ignores `ownImagePath` without a log line. Works with any image URL, including EUMETSAT WMS (see [below](#using-eumetsat-wms)).<br>**Type:** `string` **Default:** `""` |
+| `retryDelay` | Delay before retrying a failed SLIDER **list** request (milliseconds). It does not govern image downloads: a failed image download is retried twice with a fixed backoff of 30 s and then 90 s, for SLIDER and static styles alike (see [Reliability & error handling](#reliability--error-handling)).<br>**Type:** `integer` **Default:** `30000` (30 seconds) |
+| `enableImageSaving` | Save each satellite image to the `images/` subfolder. For all four SLIDER styles (and the `meteosat` alias), files are named with the SLIDER timestamp (e.g., `globe_20260227123000.png`) and duplicates are skipped by filename. For static styles, files are named with the local download time and duplicate images are detected via content hash (identical images are not saved again).<br>**Type:** `boolean` **Default:** `false` |
+| `coastlines` | Show a coastline and country border underlay beneath the satellite image. **Only applies to static styles** — SLIDER styles already have natural coastlines in the GeoColor imagery, so the underlay is suppressed there. See [Coastline underlay](#coastline-underlay) for how it is drawn and which projection to pick.<br>**Values:** `false` (off), `"europe"`, `"americas"`, `"asia"`<br>**Default:** `false` |
+| `clipRadius` | Override the circular clip radius (in percent) of the displayed globe. Leave at `null` to keep the per-style default (50%, or 44% for `centralAmericaDiscNat`). Set a smaller value to crop away an unwanted image border or footer on **any** background. The override also applies to the `coastlines` underlay. Must be a number — a quoted `"48.55"` is silently ignored.<br>**Type:** `number` (or `null`) **Default:** `null` |
+| `logLevel` | Controls logging verbosity in pm2 logs. `"ERROR"`: only errors. `"WARN"`: adds warnings (e.g., failed fetches). `"INFO"`: adds new images, saves, and entering or leaving archive mode. `"DEBUG"`: adds poll activity, startup details, and duplicate detection.<br>**Values:** `"ERROR"`, `"WARN"`, `"INFO"`, `"DEBUG"` **Default:** `"ERROR"` |
+| `switchToStaticIfStale` | When `true`, automatically switches to pre-rendered static fallback images once the live satellite feed stops changing. Only applies to static styles (`europeDiscNat`, `ownImagePath`, etc.), not SLIDER styles. See [Static fallback for stale images](#static-fallback-for-stale-images) for the thresholds that actually apply.<br>**Type:** `boolean` **Default:** `false` |
+| `staleFallbackMarker` | Visual marker to indicate archive mode on fallback images. See [Fallback marker](#fallback-marker) for the three formats and their dependencies.<br>**Type:** `string` **Default:** `"330:75:4:cornflowerblue"` |
+| `archiveSunPhase` | Sunrise and sunset times (UTC) of the archive images, determined by visual inspection. Format: `"HHMM:HHMM"`, e.g. `"0730:1830"`. When set, the module adjusts archive image selection to compensate for seasonal daylight differences between the archive date and today. Requires `lat`/`lon` **and** `switchToStaticIfStale: true` — the value is only ever read while serving a fallback image, so without that switch it does nothing. Leave empty to disable (direct UTC matching).<br>**Type:** `string` **Default:** `""` |
+| `lat` | Mirror location latitude. Used by `archiveSunPhase` for SunCalc sunrise/sunset calculation, and therefore only effective together with it.<br>**Type:** `number` **Default:** `52.52` (Berlin) |
+| `lon` | Mirror location longitude. Same conditions as `lat`.<br>**Type:** `number` **Default:** `13.405` (Berlin) |
 
 ### Available styles
 
 #### SLIDER styles (GeoColor with day/night visualization and city lights)
 
-These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and poll at `sliderPollInterval` (10 minutes by default). They only download when a new image is available. The cadence column is measured, not assumed: over 99 gaps per satellite in `latest_times.json`, the gaps are these values to the second, with occasional single missing slots showing up as exactly double.
+These styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and poll at `sliderPollInterval`. They only download when a new image is available. The cadence column is measured, not assumed: over the 99 gaps between the 100 entries of `latest_times.json`, these values dominate (97 of 99 for Meteosat, 98 of 99 for the others); the remainder are single missing slots showing up as exactly double, plus one 601-second gap on GOES-19 (measured 2026-10-26).
 
 | Style | Satellite | Region | Cadence | Status |
 |-------|-----------|--------|---------|--------|
@@ -138,19 +149,35 @@ Set `sliderPollInterval` to the cadence of your satellite, and add `syncDelay` i
 
 #### Static styles (polled at `updateInterval`)
 
+Status measured 2026-10-26 by requesting each URL the way the module does it — without following redirects, because Node's `http.get` does not follow them and the module only accepts HTTP 200.
+
 | Style | Satellite | Region | Source | Status |
 |-------|-----------|--------|--------|--------|
-| `geoColor` | Himawari-8 | Asia / Pacific | [RAMMB](http://rammb.cira.colostate.edu/ramsdis/online/himawari-8.asp) | Active |
-| `natColor` | Himawari-8 | Asia / Pacific | RAMMB | Active |
-| `airMass` | Himawari-8 | Asia / Pacific | RAMMB | Active |
-| `fullBand` | Himawari-8 | Asia / Pacific | RAMMB | Active |
-| `centralAmericaDiscNat` | GOES-16 | Americas | [NOAA STAR](https://www.star.nesdis.noaa.gov/GOES/) | Active |
-| `europeDiscNat` | Meteosat MSG | Europe / Africa | EUMETSAT | **Unreliable** — was offline Feb 2026, back online Apr 2026, but subject to extended outages without notice. Use `switchToStaticIfStale: true` for resilience. |
-| `europeDiscSnow` | Meteosat MSG | Europe / Africa | EUMETSAT | **Unreliable** — same as `europeDiscNat` |
+| `geoColor` | Himawari-8 | Asia / Pacific | [RAMMB](http://rammb.cira.colostate.edu/ramsdis/online/himawari-8.asp) | **Frozen** — HTTP 200, but `Last-Modified: Thu, 09 Sep 2021`. The RAMMB `latest` feed has not moved in five years. This is the module's default style; use `geoColorAsia` for the same region live. |
+| `natColor` | Himawari-8 | Asia / Pacific | RAMMB | **Frozen** — same feed, `Last-Modified: 09 Sep 2021` |
+| `airMass` | Himawari-8 | Asia / Pacific | RAMMB | **Frozen** — same feed, `Last-Modified: 09 Sep 2021` |
+| `fullBand` | Himawari-8 | Asia / Pacific | RAMMB | **Frozen** — same feed, `Last-Modified: 09 Sep 2021` |
+| `centralAmericaDiscNat` | GOES-16 | Americas | [NOAA STAR](https://www.star.nesdis.noaa.gov/GOES/) | **Broken** — the GOES16 path answers `301` and points at the identical GOES19 path, which is live and current. The module does not follow the redirect, so no image arrives. |
+| `europeDiscNat` | Meteosat MSG | Europe / Africa | EUMETSAT | **Discontinued** — `301` to `https://view.eumetsat.int/`, which serves a 709-byte web app, not an image. Use `geoColorEurope` or the [WMS route](#using-eumetsat-wms). |
+| `europeDiscSnow` | Meteosat MSG | Europe / Africa | EUMETSAT | **Discontinued** — same as `europeDiscNat` |
 
-**Note:** If you were using `europeDiscNat` or `europeDiscSnow`, consider switching to `geoColorEurope` — it provides the same Meteosat satellite view of Europe and Africa, with the bonus of a beautiful nighttime visualization. The old `meteosat` style name still works as an alias. If you prefer to keep `europeDiscNat` (which is back online as of April 2026 but unreliable), enable `switchToStaticIfStale: true` to automatically fall back to archive images during EUMETSAT outages.
+**Note:** If you were using `europeDiscNat` or `europeDiscSnow`, switch to `geoColorEurope` — it provides the same Meteosat satellite view of Europe and Africa, with the bonus of a beautiful nighttime visualization — or to the `ownImagePath` WMS route described below. The old `meteosat` style name still works as an alias for `geoColorEurope`. For the four Himawari-8 styles, `geoColorAsia` covers the same region from the same satellite position and is live.
 
-### Synchronising to the publication grid
+`switchToStaticIfStale` does not help with the `301` cases: the stale check only runs on a successful HTTP 200 response, so a redirect or a server error reaches neither the `Last-Modified` nor the hash path.
+
+## Optional integration with MMM-PresenceScreenControl
+
+MMM-Globe passively listens for the `MMM_PSC-SCREEN_POWERSTATUS` notification emitted by [MMM-PresenceScreenControl](https://github.com/rkorell/MMM-PresenceScreenControl).
+
+If that module is installed and reports that the screen is currently off (no presence, or inside a configured cron-off window), MMM-Globe suspends its retry attempts on upstream failures. The regular polling cycle continues unchanged, so your image archive stays complete, but the module won't issue extra retry requests that nobody would see anyway.
+
+This is purely an optional optimisation. MMM-Globe works exactly the same way without MMM-PresenceScreenControl installed — the notification is simply never received, and retries always run.
+
+[MMM-PresenceScreenControl](https://github.com/rkorell/MMM-PresenceScreenControl) is a presence and screen-power management module for MagicMirror² with PIR/MQTT sensor support, cron-based on/off and always-on windows, click-to-wake, and a notification API for cross-module integration. If you run MagicMirror on a Raspberry Pi with a display that should turn on and off based on presence, it's worth a look.
+
+---
+
+## Synchronising to the publication grid
 
 A satellite publishes on a fixed cadence, but the module has no way of knowing *where* in that cadence it currently is. Polling therefore starts wherever MagicMirror happened to start, and that phase is what decides how old the picture on your mirror is. Poll every minute and you are never more than a minute behind, at the price of 1440 requests a day for 96 images. Poll once per cadence and you make 96 requests — but the phase stands still, and if it happens to sit badly, every image reaches the mirror almost a full cadence late, for as long as the module runs.
 
@@ -176,9 +203,9 @@ With that configuration the module behaves like this:
 
 The picture is then one to two `syncDelay` old when it reaches the mirror, instead of up to a full interval — at one request per slot instead of fifteen.
 
-The grid is built purely from arrival times. The capture timestamp an entry carries is never read for it, and that is deliberate: between capture and availability sits a processing delay of roughly 45 minutes for Meteosat and 24 for the GOES satellites, and it is not constant. What *is* constant is the distance between two arrivals, and that distance is the cadence — so the arrival is the only thing worth measuring.
+The grid is built purely from arrival times. The capture timestamp an entry carries is never read for it, and that is deliberate: between capture and availability sits a processing delay that is not constant. Measured on 2026-10-26 between 11:17 and 11:47 UTC, by polling `latest_times.json` once a minute and bracketing the moment a new entry appeared: Meteosat 39–44 minutes, GOES-19 14–17 minutes across three consecutive slots, Himawari 29–34 minutes. What *is* constant is the distance between two arrivals, and that distance is the cadence — so the arrival is the only thing worth measuring.
 
-If a slot is late or missing, the module follows up three times at `syncDelay` and then waits for the next grid point. Missing slots are not rare enough to ignore and not frequent enough to worry about: 1 to 4 % of them, always single ones, showing up in the list as exactly one doubled gap. And they are never delivered afterwards — a slot that has not arrived by the time the next one does is gone for good, which is why the module stops asking after three attempts instead of chasing it. Neither the follow-ups nor any interface error move the grid; once found, origin and cadence stay put until the module restarts.
+If a slot is late or missing, the module follows up three times at `syncDelay` and then waits for the next grid point. Missing slots are not rare enough to ignore and not frequent enough to worry about: 1 to 2 % of them in the measured lists, always single ones, showing up as exactly one doubled gap. And they are never delivered afterwards — a slot that has not arrived by the time the next one does is gone for good, which is why the module stops asking after three attempts instead of chasing it. Neither the follow-ups nor any interface error move the grid; once found, origin and cadence stay put until the module restarts.
 
 The cadence is yours to set, and `sliderPollInterval` is where you set it. The module measures the gaps in the list only to check your value, and if the two disagree it says so and falls back to plain fixed-interval polling:
 
@@ -189,7 +216,7 @@ disabled, polling at the configured interval. Set sliderPollInterval: 900 * 1000
 
 The same happens if the operator ever changes the publishing rate — the check runs on every list fetch, so a changed cadence is reported instead of silently producing a wrong grid.
 
-### Using EUMETSAT WMS
+## Using EUMETSAT WMS
 
 EUMETSAT's WMS endpoint at `view.eumetsat.int` can deliver satellite images in geostationary projection, which displays as a perfect globe with MMM-Globe's CSS circle clipping. Combined with the `coastlines: "europe"` underlay, this effectively recreates the discontinued `europeDiscNat` imagery — the old EUMETSAT static images had the same kind of coastline/border overlay baked in. Use the `ownImagePath` option with a WMS GetMap URL:
 
@@ -205,7 +232,7 @@ config: {
 
 The key parameter is `srs=AUTO:42003,9001,{longitude},0` — this geostationary projection centered on the satellite's longitude produces a round Earth disc. Set `BGCOLOR=0x000000` for a black background.
 
-**Footer bar:** EUMETSAT WMS images carry a footer bar (logo + timestamp) at the bottom. Add `clipRadius: 48.55` to crop it away — this works on any mirror background, not just black. Thanks to [@Muffexx](https://github.com/Muffexx) for the idea ([#1](https://github.com/rkorell/MMM-Globe/issues/1)).
+**Footer bar:** Some EUMETSAT WMS layers and sizes carry a footer bar (logo + timestamp) at the bottom. `clipRadius: 48.55` crops it away, and that works on any mirror background, not just black. Check your own layer before setting it: on `msg_fes:rgb_naturalenhncd` at 600×600 and at 1200×1200, WMS 1.1.0 as well as 1.3.0, no footer was present when measured on 2026-10-26 — the bottom rows were pure black and the disc was centred. Thanks to [@Muffexx](https://github.com/Muffexx) for the idea ([#1](https://github.com/rkorell/MMM-Globe/issues/1)).
 
 Some useful WMS layers:
 
@@ -223,13 +250,13 @@ The `msg_fes` layers update every 15 minutes, `mtg_fd` layers every 10 minutes. 
 warning: 99 Default value used: time=2026-10-25T11:15:00.000Z ISO8601 (msg_fes:rgb_naturalenhncd)
 ```
 
-That is worth knowing for two reasons. It lets you see how far behind the live feed actually runs — at 11:37 UTC the server above was still serving the 11:15 slot. And the same header comes back for a request with `width=1&height=1`, which costs **70 bytes instead of 600 KB** while naming the identical slot. So for WMS sources there is a cheap way to ask "is there anything new yet" without downloading a picture to find out — the equivalent of what `latest_times.json` is for the SLIDER styles. The module does not use this yet; `syncDelay` currently applies to the SLIDER styles only.
+That is worth knowing for two reasons. It lets you see how far behind the live feed actually runs — at 11:37 UTC the server above was still serving the 11:15 slot. And the same header comes back for a request with `width=1&height=1`, which costs **70 bytes instead of 600 KB** while naming the identical slot (verified 2026-10-26: `content-length: 70`). So for WMS sources there is a cheap way to ask "is there anything new yet" without downloading a picture to find out — the equivalent of what `latest_times.json` is for the SLIDER styles. The module does not use this yet; `syncDelay` currently applies to the SLIDER styles only.
 
-### Coastline underlay
+## Coastline underlay
 
-**Note:** Coastlines are only applied for static styles. SLIDER styles (`geoColorEurope`, `geoColorUSA`, etc.) already include natural coastlines in their GeoColor imagery — the overlay is automatically suppressed.
+The `coastlines` option adds a subtle underlay of coastlines and country borders beneath the satellite image. It applies to static styles only; for SLIDER styles it is suppressed, because the GeoColor imagery already carries its own coastlines.
 
-The `coastlines` option adds a subtle underlay of coastlines and country borders beneath the satellite image. Three pre-rendered PNG overlays (1200×1200, downscaled for thinner lines) are included, each in the correct geostationary projection:
+Three pre-rendered PNG overlays (1200×1200, downscaled for thinner lines) are included, each in the correct geostationary projection:
 
 - `"europe"` — centered at 0° longitude (Meteosat perspective)
 - `"americas"` — centered at -75.2° longitude (GOES-16 perspective)
@@ -237,17 +264,21 @@ The `coastlines` option adds a subtle underlay of coastlines and country borders
 
 The underlay uses CSS `mix-blend-mode: lighten`, which means the coastlines are only visible where the satellite image is dark (night side or black background). On the bright day side, the satellite image dominates completely. This creates a natural effect where borders fade in as the Earth rotates into night.
 
+The alignment of the overlay is calibrated for an MSG `rgb_naturalenhncd` image of 600×600 displayed at `imageSize: 750` (`MMM-Globe.css`, `.MMM-Globe-coastlines`). The vertical correction in that rule is an absolute pixel value, so at other `imageSize` values the overlay sits slightly off; adjust it in your `custom.css` if you use a markedly different size.
+
 The coastline data comes from Natural Earth (`ne_10m_coastline` + `ne_boundary_lines_land`) via the EUMETSAT WMS background layers.
 
-### Static Fallback for Stale Images
+## Static fallback for stale images
 
 EUMETSAT's data processing pipeline occasionally experiences extended outages (e.g., April 2026: >30 hours of stale imagery). During such events, the module would display the same frozen satellite image for hours or even days.
 
-The static fallback feature addresses this: set **`switchToStaticIfStale: true`** in your config, and the module will automatically detect when the live feed has gone stale and switch to pre-rendered archive images that match the current time of day. When the live feed recovers, the module seamlessly switches back — no manual intervention needed.
+The static fallback feature addresses this: set **`switchToStaticIfStale: true`** in your config, and the module detects when the live feed has stopped changing and switches to pre-rendered archive images that match the current time of day. When the live feed recovers, the module switches back — no manual intervention needed.
 
-#### Enabling the feature
+Two limits are worth knowing before you rely on it. It only triggers on a **successful** download whose content has stopped changing: a server that answers with an error status, a redirect, or an HTML body instead of an image reaches neither detection path, and the mirror then keeps showing the last good image without a marker. And it applies to static styles only, not to the SLIDER styles.
 
-Add `switchToStaticIfStale: true` to your module config. This activates stale detection for all static styles (`europeDiscNat`, `ownImagePath`, etc.). SLIDER styles are not affected — they use a different polling mechanism.
+### Enabling the feature
+
+Add `switchToStaticIfStale: true` to your module config.
 
 ```js
 config: {
@@ -261,24 +292,26 @@ config: {
 }
 ```
 
-#### How stale detection works
+### How stale detection works
 
-1. On each poll, the module checks the `Last-Modified` HTTP header of the downloaded image
-2. If the image is older than 90 minutes, it is considered stale and the module switches to a matching archive image
-3. As a fallback for servers that don't send `Last-Modified` headers (e.g., EUMETSAT WMS), the module also tracks content hashes — if 9 consecutive polls return the identical image, it is considered stale
-4. When the live feed recovers (a fresh image is detected), the module automatically switches back to live operation
+There are two paths, and which one applies depends on the server:
 
-#### Preparing static fallback images
+1. **`Last-Modified` header present.** On each poll the module compares the header against the current time. If the image is older than **90 minutes**, it is considered stale and the module switches to a matching archive image.
+2. **No `Last-Modified` header** (e.g. the EUMETSAT WMS). The module tracks content hashes instead and counts polls that return the identical image. It switches on the **tenth** such poll — the first one only records the reference hash, then nine identical ones follow. In elapsed time that is `9 × updateInterval`, so it matches the 90 minutes of the header path only at the default `updateInterval` of 10 minutes; at 15 minutes it takes 135 minutes, and at 30 minutes it takes 4.5 hours.
 
-The `static/` subfolder should contain pre-rendered satellite images with coastline overlay, named by UTC time: `0000.jpg`, `0015.jpg`, ..., `2345.jpg` (15-minute intervals recommended, but any subset works). One example image (`1200.jpg`) is included in the repository. To create a full set:
+When the live feed recovers — a fresh `Last-Modified`, or a changed hash — the module automatically switches back to live operation.
+
+### Preparing static fallback images
+
+The `static/` subfolder should contain pre-rendered satellite images with coastline overlay, named by UTC time: `0000.jpg`, `0015.jpg`, ..., `2345.jpg` (15-minute intervals recommended, but any subset works). Only lowercase `.jpg` is recognised; `.JPG`, `.jpeg` and `.png` files are ignored. One example image (`1200.jpg`) is included in the repository. To create a full set:
 
 1. Enable `enableImageSaving: true` in your config and let the module collect images over a full day
 2. Use a tool like Python/Pillow to merge each saved image with the matching coastline overlay (the `coastlines_europe.png` file included in the module)
 3. Name the merged images as `HHMM.jpg` (UTC time) and place them in the `static/` subfolder
 
-The module scans the `static/` folder at startup and selects the image closest to the target time. If only one image is present, it will be used regardless of the time.
+The folder is scanned the first time the fallback actually triggers, not at startup, and the result is kept for the lifetime of the MagicMirror process — images added later are picked up after a restart. From that list the module takes the **latest image at or before** the target time, which is not necessarily the nearest one: with a gap in the grid, a target of 02:20 picks `0100.jpg` even when `0245.jpg` is 25 minutes away. If only one image is present, it is used regardless of the time.
 
-#### Seasonal sun phase adjustment
+### Seasonal sun phase adjustment
 
 Archive images are captured on a specific date and reflect the day/night pattern of that date. As the seasons change, the actual sunrise and sunset times shift — the same UTC time may show a sunlit Europe in summer but a dark Europe in winter. Without correction, the archive images would show a noticeably wrong day/night boundary.
 
@@ -293,11 +326,11 @@ The module then uses **SunCalc** to compute today's actual sunrise and sunset fo
 
 This three-segment interpolation ensures the day/night boundary on the globe always looks plausible, regardless of when the archive images were originally captured.
 
-If `archiveSunPhase` is left empty (the default), no seasonal adjustment is applied and archive images are selected by direct UTC time match.
+The mapping works in minutes of the UTC day. That is correct for locations whose sunrise and sunset both fall on the same UTC date — Europe and Africa, roughly. Further east or west the daytime segment collapses and only night images are selected, and inside the polar circles SunCalc returns no sunrise or sunset at all and the mapping yields a constant image. If `archiveSunPhase` is left empty (the default), no seasonal adjustment is applied and archive images are selected by direct UTC time match.
 
-#### Fallback marker
+### Fallback marker
 
-An optional visual marker can indicate that the module is showing archive images instead of live data. Two formats are supported:
+An optional visual marker can indicate that the module is showing archive images instead of live data. Three formats are supported.
 
 **Dot marker** — a small colored dot drawn at a specific pixel position on the globe image, rendered server-side via Python/Pillow:
 
@@ -308,16 +341,19 @@ staleFallbackMarker: "330:75:4:cornflowerblue"
 // Larger red dot on Italy
 staleFallbackMarker: "340:130:8:red"
 
-// Format: "X:Y:Px:Color" — position, size (default 4px), color (default cornflowerblue)
-// Minimum: "X:Y" — uses defaults for size and color
+// Format: "X:Y:Px:Color" — position, size, color
+// Minimum: "X:Y" — uses defaults for size (4) and color (cornflowerblue)
 ```
+
+The size value is the diameter the dot is drawn around its centre, and the drawing is inclusive on both sides, so `4` produces 5 pixels across and `4` and `5` give the same result. Coordinates are in the pixel space of the archive image (600×600 for the included one); a dot outside the circular clip is simply not visible.
 
 **Text marker** — a small text label displayed below the globe as a DOM element, no additional dependencies needed:
 
 ```js
-// Text label below the globe
 staleFallbackMarker: "Archivbild"
 ```
+
+Any value that is not `off` and does not match the `digits:digits[:digits[:text]]` pattern becomes a text label. Note the consequence: a label like `"12:30"` matches the dot pattern and is drawn as a dot at pixel 12,30 — outside the visible circle, so neither a dot nor a label appears.
 
 **No marker:**
 
@@ -325,134 +361,35 @@ staleFallbackMarker: "Archivbild"
 staleFallbackMarker: "off"
 ```
 
-Both marker types disappear automatically when the live feed recovers.
+Both marker types disappear automatically when the live feed recovers. The dot is baked into the image file, so it survives a browser reload; the text label is sent alongside the image and reappears only with the next poll after a reload.
 
-**Dependencies:** The dot marker format requires Python 3 with Pillow (`python3-pil` or `pip install Pillow`). Pillow is pre-installed on Raspberry Pi OS. Text markers and the stale detection itself have no additional dependencies.
+**Dependencies:** The dot marker format requires Python 3 with Pillow (`python3-pil` or `pip install Pillow`). Pillow is pre-installed on Raspberry Pi OS. If the call fails, the image is served without a marker and a warning is logged. Text markers and the stale detection itself have no additional dependencies.
 
 ## Reliability & error handling
 
 Some upstream APIs (notably the EUMETSAT WMS GeoServer used via `ownImagePath`) occasionally respond with HTTP 200 but an OGC `<ServiceExceptionReport>` XML body instead of an image — typically during maintenance windows or transient connection-pool exhaustion.
 
-Since v3.2.2, MMM-Globe validates every downloaded response against known image signatures (PNG, JPEG, GIF) before writing it to disk. Invalid responses (XML, HTML error pages, empty bodies) are discarded — the frontend keeps showing the last valid image rather than a broken one. Failed responses do not corrupt the `current.png` file shown on the mirror.
+Since v3.2.2, MMM-Globe validates every downloaded response against known image signatures (PNG, JPEG, GIF) before writing it to disk. Invalid responses (XML, HTML error pages, empty bodies) are discarded — the frontend keeps showing the last valid image rather than a broken one. Failed responses do not corrupt the `current.png` file shown on the mirror. Note that formats outside those three — WebP, AVIF, BMP, TIFF — are rejected as well, so a WMS configured with such a `format=` parameter never produces a visible image.
 
 When an image download fails, the module retries the request up to two times with backoff (30 s, then 90 s) within the same poll cycle. Since v3.5.0 this covers every kind of failure — an HTTP error status, a socket error and a timeout as well as an invalid body; before, only the invalid body was retried, and with a poll interval of ten minutes or more that silently cost a whole slot. If all retries fail, a single line is emitted at WARN log level and the module waits for the next regular poll. Polling frequency itself is never reduced — your image archive (when `enableImageSaving` is on) continues to grow at the configured rate.
 
-## Optional integration with MMM-PresenceScreenControl
-
-MMM-Globe passively listens for the `MMM_PSC-SCREEN_POWERSTATUS` notification emitted by [MMM-PresenceScreenControl](https://github.com/rkorell/MMM-PresenceScreenControl).
-
-If that module is installed and reports that the screen is currently off (no presence, or inside a configured cron-off window), MMM-Globe suspends its retry attempts on upstream failures. The regular polling cycle continues unchanged, so your image archive stays complete, but the module won't issue extra retry requests that nobody would see anyway.
-
-This is purely an optional optimisation. MMM-Globe works exactly the same way without MMM-PresenceScreenControl installed — the notification is simply never received, and retries always run.
-
-[MMM-PresenceScreenControl](https://github.com/rkorell/MMM-PresenceScreenControl) is a presence and screen-power management module for MagicMirror² with PIR/MQTT sensor support, cron-based on/off and always-on windows, click-to-wake, and a notification API for cross-module integration. If you run MagicMirror on a Raspberry Pi with a display that should turn on and off based on presence, it's worth a look.
+---
 
 ## Architecture
 
 The module uses a clean backend/frontend separation. The frontend knows nothing about remote URLs, polling, or image saving — it only displays what the backend provides.
 
-**Backend (`node_helper.js`)** — all image fetching runs server-side for consistent logging in pm2 and to avoid CORS issues. Three methods with clear responsibilities:
+**Backend (`node_helper.js`)** — all image fetching runs server-side for consistent logging in pm2 and to avoid CORS issues. Five methods with clear responsibilities:
 
-- **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API at `sliderPollInterval` (10 minutes by default, 60 seconds minimum) for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. With `syncDelay` set it runs on a grid instead of a fixed rate: titrate the publication phase in `syncDelay` steps, take the first observed change plus `syncDelay` as the grid origin, then poll at origin + n × cadence, with up to three follow-ups at `syncDelay` on an empty grid point (`scheduleNextSliderPoll`, `scheduleSyncedPoll`). The cadence is the configured interval, verified against the gaps in the list on every fetch (`measureCadence`, `verifyCadence`). Every interface error — HTTP status, unreadable JSON, socket error, timeout — is retried after `retryDelay`, never later than the next regular poll, and never moves the grid (`scheduleAfterSliderError`).
-- **`pollStatic`** (all other styles + `ownImagePath`): Triggers a download at each `updateInterval`. Covers all built-in styles (geoColor, natColor, airMass, fullBand, europeDisc*, centralAmericaDiscNat) as well as custom URLs via `ownImagePath`.
-- **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for meteosat and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains. For static styles with `switchToStaticIfStale` enabled, the `Last-Modified` HTTP header is checked before processing — if the image is older than 90 minutes, `serveStaticFallback` is called instead.
-- **`serveStaticFallback`** (stale image handler): Selects a time-appropriate image from the `static/` subfolder, optionally draws a dot marker via Python/Pillow subprocess, writes it to `current.png`, and sends it to the frontend with a `fallbackText` field for text markers. Called automatically when the live feed is detected as stale. When `archiveSunPhase` is configured, uses `mapToArchiveTime` for seasonal day/night adjustment.
-- **`mapToArchiveTime`** (seasonal adjustment): Maps the current UTC time to an archive-equivalent time using three-segment linear interpolation based on SunCalc sunrise/sunset data. Ensures the archive image's day/night boundary matches the current season.
+- **`pollSlider`** (SLIDER styles: geoColorEurope/USA/Pacific/Asia): Polls the CIRA SLIDER API at `sliderPollInterval` for the configured satellite, compares the latest timestamp with the previously known one, and triggers a download only when a new image is available. With `syncDelay` set it runs on a grid instead of a fixed rate: titrate the publication phase in `syncDelay` steps, take the first observed change plus `syncDelay` as the grid origin, then poll at origin + n × cadence, with up to three follow-ups at `syncDelay` on an empty grid point (`scheduleNextSliderPoll`, `scheduleSyncedPoll`). The cadence is the configured interval, verified against the gaps in the list on every fetch (`measureCadence`, `verifyCadence`). Every interface error — HTTP status, unreadable JSON, socket error, timeout — is retried after `retryDelay`, never later than the next regular poll, and never moves the grid (`scheduleAfterSliderError`).
+- **`pollStatic`** (all other styles + `ownImagePath`): Triggers a download at each `updateInterval`. Covers all built-in static styles as well as custom URLs via `ownImagePath`.
+- **`downloadAndServe`** (shared by both polling methods): Downloads the image, writes it to `images/current.png`, and sends the local file path to the frontend. When `enableImageSaving` is `true`, a timestamped copy is also saved. Duplicate detection uses SLIDER timestamps (filename-based) for the SLIDER styles and MD5 content hashes for all other styles. All HTTP requests have timeouts (15s for API calls, 30s for image downloads) to prevent stalled polling chains. For static styles with `switchToStaticIfStale` enabled, the `Last-Modified` header is checked before processing — if the image is older than 90 minutes, `serveStaticFallback` is called instead.
+- **`serveStaticFallback`** (stale image handler): Selects a time-appropriate image from the `static/` subfolder, optionally draws a dot marker via Python/Pillow subprocess, writes it to `current.png`, and sends it to the frontend with a `fallbackText` field for text markers. When `archiveSunPhase` is configured, uses `mapToArchiveTime` for seasonal day/night adjustment.
+- **`mapToArchiveTime`** (seasonal adjustment): Maps the current UTC time to an archive-equivalent time using three-segment linear interpolation based on SunCalc sunrise/sunset data.
 
-**Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` (static styles only — SLIDER styles have natural coastlines).
+**Frontend (`MMM-Globe.js`)** — pure display layer. On start, immediately loads `current.png` if it exists (instant recovery after browser refresh). Receives image path updates from the backend, loads them into an `<img>` element, and renders with CSS `clip-path: circle()`. Optionally adds a coastline underlay via CSS `mix-blend-mode: lighten` ([static styles only](#coastline-underlay)).
 
-## What changed compared to the original?
-
-### v3.5.0 — Sync to the publication grid (Oct 2026)
-
-- **New `syncDelay` parameter**: Locks the SLIDER polls onto the publication grid of the service. The module titrates the unknown phase in `syncDelay` steps, takes the first observed change plus `syncDelay` as the grid origin and then polls once per slot. The image reaches the mirror one to two `syncDelay` after publication, at one list request and one image per slot instead of one request per minute. Off by default. See [Synchronising to the publication grid](#synchronising-to-the-publication-grid).
-- **`sliderPollInterval` default is now `10 * 60 * 1000`** instead of 60 seconds. **If you have never set this option, your setup changes.** The 60 seconds only ever made sense as a brute-force substitute for knowing the phase: it polled fifteen times per image so that the newest one would never be more than a minute old. Ten minutes is the real cadence of GOES-19, GOES-18 and Himawari, and `geoColorEurope` wants `15 * 60 * 1000`. Without `syncDelay` the polls still run free, so an image can now be up to one interval old; for the three satellites whose cadence equals the new default, the phase even stands still and the delay stays wherever the start put it. Setting `syncDelay` removes that — it is the whole point of the pairing. Setups that already configure `sliderPollInterval` are unaffected.
-- **Every interface error is retried now**: An HTTP error status and unreadable JSON on the list request used to wait a full poll interval instead of `retryDelay`, and an HTTP error, socket error or timeout on the image download was not retried at all. With 60 second polling that was invisible; with ten or fifteen minutes it costs a whole slot. All of them now retry — the list after `retryDelay` and never later than the next regular poll, the image through the existing 30 s / 90 s chain. An interface error never consumes a follow-up step and never moves the grid.
-- **No new log noise**: the only new messages are ERROR lines for a configuration that cannot sync (cadence mismatch, `syncDelay` at or above the cadence) and the WARN of the existing clamp pattern. A missing slot is not logged.
-
-### v3.4.1 — Two SLIDER polling defects (Oct 2026)
-
-- **Poll chain no longer multiplies after a timeout**: `req.destroy()` in the timeout handler also emits an `error` event, so the timeout path and the error path each scheduled a successor — every timeout permanently doubled the number of running poll chains, and each one issued its own requests. All SLIDER paths now schedule through a single timer that is cleared before it is replaced, so exactly one poll is ever pending. Chains that already multiplied collapse back to one at the next poll, without needing a restart.
-- **A failed image download no longer loses the slot**: the timestamp was marked as fetched before the download ran, and `downloadAndServe` reported neither success nor failure. If the image never arrived — validation failure, HTTP error, socket error, timeout, screen off, unwritable file — that image was skipped for good. The timestamp is now recorded only after the image has been written and handed to the frontend, so the next poll fetches the slot again.
-- **No config changes**: `sliderPollInterval` keeps the meaning it has in v3.4.0, and the static styles are untouched.
-- **Thanks** again to [@OberfragGER](https://github.com/OberfragGER), whose Pi-hole log in issue [#2](https://github.com/rkorell/MMM-Globe/issues/2) showed four to five requests per poll where there should have been two, which is what exposed the first defect.
-
-### v3.4.0 — Configurable SLIDER poll interval (Oct 2026)
-
-- **New `sliderPollInterval` parameter**: Sets how often the CIRA SLIDER API is asked for a new image, for the SLIDER styles (`geoColorEurope`/`USA`/`Pacific`/`Asia` and the `meteosat` alias). Previously hardcoded to 60 seconds. Since SLIDER publishes a new image only every 10–15 minutes, a longer interval such as `15 * 60 * 1000` costs nothing in freshness and reduces outbound requests to the same external host. Defaults to the previous 60 seconds, so existing setups are unaffected.
-- **Minimum enforced at 60 seconds**: Lower values are clamped to 60 s and logged as a warning. SLIDER is a free third-party service and should not be polled harder than before.
-- **Closes the gap to the static styles**: Those already took their cadence from `updateInterval`; the SLIDER path now has the same configurability.
-- **Thanks** to [@OberfragGER](https://github.com/OberfragGER) for reporting the missing option and supplying a working patch in issue [#2](https://github.com/rkorell/MMM-Globe/issues/2), which this release is based on.
-
-### v3.3.0 — Configurable clip radius, footer overlay removed (Aug 2026)
-
-- **New `clipRadius` parameter**: Overrides the circular clip radius (in percent) of the displayed globe, applied inline to both the satellite image and the coastline underlay. Lets you crop away an image border or footer on any background — e.g. `clipRadius: 48.55` removes the EUMETSAT WMS footer bar. Defaults to `null` (unchanged per-style behaviour: 50%, or 44% for `centralAmericaDiscNat`).
-- **Removed the black footer overlay**: The previous CSS `::after` black bar (added to mask the EUMETSAT footer) only worked on a black mirror background and left a visible black rectangle on custom backgrounds. It is replaced by the background-agnostic `clipRadius` crop. Existing setups relying on the bar for EUMETSAT should set `clipRadius: 48.55`.
-- **Thanks** to [@Muffexx](https://github.com/Muffexx) for suggesting the clip-based approach in issue [#1](https://github.com/rkorell/MMM-Globe/issues/1), which motivated this release.
-
-### v3.2.2 — Image content validation, retries, PSC integration (Jun 2026)
-
-- **Magic-byte validation**: Every downloaded response is checked against known image signatures (PNG, JPEG, GIF) before being written to disk. Prevents XML error bodies (notably from EUMETSAT WMS under load) from polluting `current.png` or the saved image archive.
-- **Automatic retry with backoff**: When a response fails validation, the module retries up to two times within the same poll cycle (30 s, then 90 s) before giving up and waiting for the next regular poll.
-- **Optional PSC integration**: Passively listens for `MMM_PSC-SCREEN_POWERSTATUS` from [MMM-PresenceScreenControl](https://github.com/rkorell/MMM-PresenceScreenControl). When the screen is reported as off, retries are suspended (regular polling continues unchanged).
-- **No new config parameters**: All retry behaviour is internal. The module works identically without PSC installed.
-- **Lazy static-fallback indexing**: The `static/` directory is now scanned only when the stale-fallback feature is actually triggered for the first time, not eagerly at module startup. Reduces startup work for the (common) case where the fallback never fires.
-
-### v3.2.1 — Seasonal sun phase adjustment (Apr 2026)
-
-- **Seasonal archive image mapping**: New `archiveSunPhase` parameter compensates for seasonal daylight differences between archive images and the current date. Uses SunCalc (from MagicMirror's built-in modules) to compute today's sunrise/sunset and maps archive images proportionally via three-segment interpolation (pre-dawn night, daytime, post-dusk night). The day/night boundary on the globe now always matches the actual time of year.
-- **Mirror location**: New `lat`/`lon` config parameters for SunCalc calculation (default: Berlin).
-
-### v3.2.0 — Static fallback for stale images (Apr 2026)
-
-- **Automatic stale detection**: Set `switchToStaticIfStale: true` to enable. When the live satellite feed has not updated for 90 minutes (checked via `Last-Modified` HTTP header, with hash-based fallback for servers without `Last-Modified`), the module automatically switches to pre-rendered static fallback images from the `static/` subfolder. Works with `europeDiscNat`, `ownImagePath`, and other static styles.
-- **Time-matched fallback images**: Fallback images are named by UTC time (`HHMM.jpg`) and the module selects the one closest to the current time, so the displayed globe always shows a realistic day/night pattern.
-- **Configurable visual marker**: A small dot (rendered server-side via Python/Pillow) or text label (rendered as DOM element) can indicate archive mode. Dot markers offer pixel-perfect positioning on the globe image; text markers appear below the globe and require no additional dependencies.
-- **Automatic recovery**: When the live feed returns (fresh `Last-Modified` detected), the module seamlessly switches back to live operation.
-- **EUMETSAT status update**: `europeDiscNat` and `europeDiscSnow` are back online as of April 2026 but remain unreliable — subject to extended outages without notice. The static fallback feature provides resilience for users of these styles.
-
-### v3.1.0 — Multi-satellite SLIDER support (Mar 2026)
-
-- **Four SLIDER perspectives**: GeoColor imagery from four geostationary satellites — `geoColorEurope` (Meteosat), `geoColorUSA` (GOES-19), `geoColorPacific` (GOES-18), `geoColorAsia` (Himawari). All provide the same beautiful day/night visualization with city lights.
-- **Backwards compatible**: The old `meteosat` style name continues to work as an alias for `geoColorEurope`.
-- **Frontend self-recovery**: The frontend now loads `current.png` immediately on start, providing instant display after browser refresh without waiting for the next backend poll cycle.
-- **Coastlines for static styles only**: The `coastlines` overlay is automatically suppressed for SLIDER styles, which already have natural coastlines in the GeoColor imagery.
-
-### v3.0.0 — Architecture refactoring (Feb 2026)
-
-Complete refactoring of the module's internal architecture. The frontend and backend responsibilities are now cleanly separated:
-
-- **Single download pipeline**: All image fetching consolidated into one shared `downloadAndServe()` method used by both SLIDER and static polling. Previously, different styles used different fetch paths with duplicated logic, and some paths downloaded images twice (once for display, once for saving).
-- **Frontend is display-only**: The frontend (`MMM-Globe.js`) no longer fetches images, manages URLs, or knows about `enableImageSaving`. It receives a local file path from the backend and displays it. All polling, downloading, saving, and error handling runs in the backend (`node_helper.js`).
-- **HTTP timeouts**: All HTTP requests now have timeouts (15s for API calls, 30s for image downloads). Previously, a stalled HTTP connection could block the entire polling chain indefinitely.
-- **Configurable logging** (`logLevel`): Four levels (ERROR, WARN, INFO, DEBUG) with an unconditional startup message. Default is ERROR (silent operation). All logging happens in the backend (visible in pm2 logs), not in the Electron browser console.
-- **Coastline/border underlay**: Configurable `coastlines` option with three pre-rendered overlays (europe, americas, asia) in the correct geostationary projection for each satellite view.
-
-### v2.0.0 — New features (Feb 2026)
-
-- **Meteosat via CIRA SLIDER** (`style: "meteosat"`): Full-disk GeoColor imagery of Europe/Africa with day/night visualization
-- **EUMETSAT WMS support**: Use `ownImagePath` with WMS GetMap URLs in geostationary projection
-- **Image saving for all styles**: `enableImageSaving` works for all styles, not just meteosat
-- **Smart SLIDER polling**: Polls at a configurable interval (60s by default) but only downloads when a genuinely new image is available
-
-### Bugfixes from the original module
-
-- **`europeDiscSnow` hi-res URL mismatch:** The original had a key mismatch between `imageUrls` (`europeDiscSnow`) and `hiResImageUrls` (`europePartSnow`). Using `europeDiscSnow` with `imageSize > 800` silently failed. Both keys are now consistent.
-- **Mixed content (HTTP → HTTPS):** All RAMMB image URLs updated from `http://` to `https://`.
-- **Loose equality operators:** All `==` / `!=` replaced with strict `===` / `!==`.
-- **Cache-buster for URLs with query string:** The original appended `?timestamp` as a cache-buster, which broke URLs that already contain a `?` (such as WMS URLs). Now correctly uses `&` when a query string is already present.
-- **Startup reliability:** Image loading moved out of `getDom()` into the backend polling loop with automatic retry on failure, so the globe appears even when the network isn't ready at boot time.
-- **Double image downloads:** When `enableImageSaving` was enabled, images were downloaded twice — once for display, once for saving. Now a single download serves both purposes.
-- **No HTTP timeouts:** The original had no timeouts on HTTP requests. A stalled connection (e.g., unresponsive image server) would silently stop all polling. Now enforced at 15s/30s.
-- **`loadImage` as global function:** The original's `loadImage()` function was defined in the global scope, risking name collisions with other modules. Now scoped as `_loadImage()` inside the module.
-- **`europeDiscNat` height hack:** Removed a hard-coded height adjustment in `getDom()` that was specific to the discontinued `europeDiscNat` style's non-square image format.
-- **Silent frontend failures:** Image load errors in the frontend were swallowed silently. Now logged via `Log.warn()`.
-
-### Housekeeping
-
-- `.gitignore` consolidated, `images/` directory excluded
-- Screenshot link changed to absolute GitHub URL
-- `package.json` updated for fork
+One MagicMirror limitation to be aware of: MagicMirror creates one `node_helper` per module *type*, not per instance. Two MMM-Globe entries in `config.js` therefore share one backend — the first one's configuration wins, the second one's is ignored, and both show the same image.
 
 ## Technical notes
 
@@ -477,7 +414,13 @@ Zoom level `00` returns the full disk as a single 464×464 PNG tile — perfect 
 
 ### EUMETSAT WMS
 
-The geostationary projection `AUTO:42003,9001,{lon},0` maps the visible Earth disk as seen from a geostationary satellite at the given longitude. This produces a circular Earth image that works perfectly with the module's `clip-path: circle()` styling.
+The geostationary projection `AUTO:42003,9001,{lon},0` maps the visible Earth disk as seen from a geostationary satellite at the given longitude. This produces a circular Earth image that works perfectly with the module's `clip-path: circle()` styling. See [Using EUMETSAT WMS](#using-eumetsat-wms) for a working URL and the available layers.
+
+---
+
+## Version history
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release, the bugfixes carried over from the original module, and the housekeeping notes.
 
 ## Special Thanks
 
@@ -487,4 +430,4 @@ The geostationary projection `AUTO:42003,9001,{lon},0` maps the visible Earth di
 
 ## License
 
-MIT — see [LICENCE](LICENCE).
+MIT — see [LICENSE](LICENSE).
