@@ -14,11 +14,11 @@ The version history lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Preview
 
-![](https://github.com/rkorell/MMM-Globe/blob/master/screenshot.png?raw=true)
+![](https://raw.githubusercontent.com/rkorell/MMM-Globe/master/screenshot.png)
 
 **Four SLIDER perspectives** — GeoColor imagery from four geostationary satellites, each with day/night visualization and city lights:
 
-![](https://github.com/rkorell/MMM-Globe/blob/master/four_perspectives.jpg?raw=true)
+![](https://raw.githubusercontent.com/rkorell/MMM-Globe/master/four_perspectives.jpg)
 
 *From left to right: GOES-19 (Americas), Meteosat (Europe/Africa), GOES-18 (Pacific), Himawari (Asia/Australia)*
 
@@ -153,7 +153,7 @@ Status measured 2026-10-26 by requesting each URL the way the module does it —
 
 | Style | Satellite | Region | Source | Status |
 |-------|-----------|--------|--------|--------|
-| `geoColor` | Himawari-8 | Asia / Pacific | [RAMMB](http://rammb.cira.colostate.edu/ramsdis/online/himawari-8.asp) | **Frozen** — HTTP 200, but `Last-Modified: Thu, 09 Sep 2021`. The RAMMB `latest` feed has not moved in five years. This is the module's default style; use `geoColorAsia` for the same region live. |
+| `geoColor` | Himawari-8 | Asia / Pacific | [RAMMB](https://rammb.cira.colostate.edu/ramsdis/online/himawari-8.asp) | **Frozen** — HTTP 200, but `Last-Modified: Thu, 09 Sep 2021`. The RAMMB `latest` feed has not moved in five years. This is the module's default style; use `geoColorAsia` for the same region live. |
 | `natColor` | Himawari-8 | Asia / Pacific | RAMMB | **Frozen** — same feed, `Last-Modified: 09 Sep 2021` |
 | `airMass` | Himawari-8 | Asia / Pacific | RAMMB | **Frozen** — same feed, `Last-Modified: 09 Sep 2021` |
 | `fullBand` | Himawari-8 | Asia / Pacific | RAMMB | **Frozen** — same feed, `Last-Modified: 09 Sep 2021` |
