@@ -99,7 +99,7 @@ Full configuration with all options:
     position: "lower_third",
     config: {
         style: "europe",                   // europe, americas, pacific, asia — or "" for imageUrl
-        imageUrl: "https://view.eumetsat.int/geoserver/wms?...",  // own image URL, used with style: ""
+        imageUrl: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",  // own image URL, used with style: ""
         updateInterval: 15 * 60 * 1000,    // poll interval of the own URL (15 min)
         imageSize: 600,                    // display size in pixels
         clipRadius: 48.55,                 // radius of the circular clip in percent; null = no clip
@@ -165,20 +165,16 @@ Your own URL works differently: the module knows nothing about it and doesn't tr
 
 ## Using EUMETSAT WMS
 
-EUMETSAT's WMS endpoint at `view.eumetsat.int` can deliver satellite images in geostationary projection, which displays as a perfect globe with the module's circular clip. Combined with the `coastlines: "europe"` underlay, this effectively recreates the discontinued EUMETSAT imagery, which had the same kind of coastline overlay baked in. It is the default `imageUrl`, so this is all it takes:
+EUMETSAT's WMS endpoint at `view.eumetsat.int` can deliver satellite images in geostationary projection, which displays as a perfect globe with the module's circular clip. Combined with the `coastlines: "europe"` underlay, this effectively recreates the discontinued EUMETSAT imagery, which had the same kind of coastline overlay baked in. Use `imageUrl` with a WMS GetMap URL and set `style` to `""`:
 
 ```js
 config: {
-    style: "",                         // use imageUrl
+    style: "",
+    imageUrl: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",
     imageSize: 600,
+    updateInterval: 15 * 60 * 1000,
     coastlines: "europe"
 }
-```
-
-The default URL, should you want to adapt it:
-
-```
-https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000
 ```
 
 The key parameter is `CRS=AUTO:42003,9001,{longitude},0` — this geostationary projection centered on the satellite's longitude produces a round Earth disc. `BGCOLOR=0x000000` gives a black background.
@@ -220,7 +216,7 @@ Satellite services have bad days — EUMETSAT's processing once stood still for 
 
 ```js
 config: {
-    style: "",
+    style: "europe",
     switchToStaticIfStale: true,
     staleFallbackMarker: "330:75:4:cornflowerblue",
     lat: 52.52,
