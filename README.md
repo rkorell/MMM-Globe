@@ -32,7 +32,7 @@ EUMETSAT migrated to a new dynamic platform at `view.eumetsat.int`, but this is 
 
 Additionally, the **CIRA SLIDER** service operated by [NOAA/RAMMB](https://rammb2.cira.colostate.edu/) at Colorado State University provides full-disk imagery of four geostationary satellites as PNG tiles, including the excellent **GeoColor** product — natural color during the day and city lights on a Blue Marble background at night. This makes for a particularly stunning globe display around sunrise and sunset.
 
-The v3 releases added both sources, a coastline overlay, image saving, an archive for stale feeds and a sync to the publication grid. Along the way the module collected a lot of baggage: of its eleven styles only four were still alive (the Himawari-8 feeds are frozen since 2021, the GOES-16 path is broken, the EUMETSAT images discontinued), the options for timing kept growing, and drawing one little dot on an archive image needed Python and Pillow. **v4 is a rewrite** around what a globe on a mirror actually needs: show the latest image as soon as it is published, and keep looking good when the source has a bad day — with four live styles, your own image URL, no timing knobs, and no Python.
+The v3 releases added both sources, a coastline overlay, image saving, an archive for stale feeds and a sync to the publication grid. Along the way the module collected a lot of baggage: of its eleven styles only four were still alive (the Himawari-8 feeds have been frozen since 2021, the GOES-16 path is broken, the EUMETSAT images were discontinued), the options for timing kept growing, and drawing one little dot on an archive image needed Python and Pillow. **v4 is a rewrite** around what a globe on a mirror actually needs: show the latest image as soon as it is published, and keep looking good when the source has a bad day — with four live styles, your own image URL, no timing knobs, and no Python.
 
 ---
 
@@ -111,7 +111,7 @@ Full configuration with a style — every option that applies, with its default:
 },
 ```
 
-Full configuration with your own image URL — here the EUMETSAT WMS; the options of the first example apply as well:
+Full configuration with your own image URL — here the EUMETSAT WMS — with every option:
 
 ```js
 {
@@ -121,8 +121,15 @@ Full configuration with your own image URL — here the EUMETSAT WMS; the option
         style: "",                         // "" = use imageUrl
         imageUrl: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",
         updateInterval: 15 * 60 * 1000,    // poll interval of the URL (15 min)
+        imageSize: 600,                    // display size in pixels
+        clipRadius: 48.55,                 // radius of the circular clip in percent; null = no clip
         coastlines: "europe",              // coastline underlay: europe, americas, pacific, asia, or false
-        imageSize: 600
+        switchToStaticIfStale: false,      // show archive images when the live feed goes stale
+        staleFallbackMarker: "off",        // "off", "X:Y:Px:Color", or a text label
+        lat: 52.52,                        // mirror location, for the day phase of archive images
+        lon: 13.405,
+        enableImageSaving: false,          // save every live image to images/
+        logLevel: "info"                   // error, warn, info, debug
     }
 },
 ```
@@ -146,7 +153,7 @@ Full configuration with your own image URL — here the EUMETSAT WMS; the option
 
 ### Available styles
 
-All four styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and show **GeoColor**: natural color by day, city lights on a Blue Marble background at night. They only download when a new image is available. The cadence is the one measured in the service's own list of captures, where it dominates clearly; the remainder are single missing slots.
+All four styles use the [CIRA SLIDER](https://slider.cira.colostate.edu) API and show **GeoColor**: natural color by day, city lights on a Blue Marble background at night. They only download when a new image is available. The cadences are measured from the service's own list of captures; the few exceptions there are single missing slots.
 
 | Style | Satellite | Region | Cadence |
 |-------|-----------|--------|---------|
@@ -244,7 +251,7 @@ At start, the log tells you if archive mode is enabled but `static/` holds nothi
 
 ### Preparing archive images
 
-The `static/` subfolder holds the archive images, named by their UTC capture time: `YYYYMMDD-HHMM.jpg` (or `.png`, `.gif`) — the same naming `enableImageSaving` uses. So building an archive is easy:
+The `static/` subfolder holds the archive images, named by their UTC time: `YYYYMMDD-HHMM.jpg` (or `.png`, `.gif`) — the same naming `enableImageSaving` uses. So building an archive is easy:
 
 1. Set `enableImageSaving: true` and let the module collect images in `images/` over a full day.
 2. Copy the images you want to `static/`. One every 15 minutes is plenty; any subset works.
@@ -294,7 +301,7 @@ Both marker types disappear automatically when the live feed recovers, and both 
 
 ## Reliability & error handling
 
-Some upstream APIs (notably the EUMETSAT WMS GeoServer) occasionally respond with HTTP 200 but an XML error report instead of an image — typically during maintenance windows. The module checks every download against the signatures of PNG, JPEG and GIF before using it. Anything else — XML, HTML error pages, empty bodies — counts as a failed attempt, and the mirror keeps showing the last valid image. Note that other formats such as WebP or AVIF are rejected as well.
+Some upstream APIs (notably the EUMETSAT WMS GeoServer) occasionally respond with HTTP 200 but an XML error report instead of an image. The module checks every download against the signatures of PNG, JPEG and GIF before using it. Anything else — XML, HTML error pages, empty bodies — counts as a failed attempt, and the mirror keeps showing the last valid image. Note that other formats such as WebP or AVIF are rejected as well.
 
 Every fetch has a timeout of 30 seconds and is attempted up to three times, ten seconds apart. If all attempts fail, a single warning names the cause (for example a DNS failure or a refused connection), and the module waits for the next regular poll. A failed image is a gap, not a reason to poll faster — your image collection keeps its regular rhythm.
 
