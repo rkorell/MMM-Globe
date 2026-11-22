@@ -1,175 +1,138 @@
-/* global Module */
-
-/* Magic Mirror
- * Module: MMM-Globe
+/* MMM-Globe — Frontend
  *
- * By Luke Scheffler https://github.com/LukeSkywalker92
- * Fork maintainer: Dr. Ralf Korell https://github.com/rkorell
- * MIT Licensed.
+ * Pure display. No timers, no fetches, no checks: it draws the payload the backend
+ * sends, and nothing else. The elements are created once and afterwards only get new
+ * values — so the old image stays until the new one has loaded, and the globe does not
+ * flash empty on a change.
+ *
+ * Modified: [2026-11-02 21:17] - Created
+ * Modified: [2026-11-11 14:38] - Recreated as MMM-Globus-Neu2 after QA: fixed elements
+ *                                instead of rebuilding, module name instead of fixed names,
+ *                                updateInterval default 15 min (cadence of the WMS)
+ * Modified: [2026-11-11 16:09] - Dot in archive image pixels, placed after loading; label
+ *                                from the config
+ * Modified: [2026-11-12 11:01] - All comments in English
+ * Modified: [2026-11-12 11:29] - imageSize and clipRadius from the own config instead of
+ *                                the payload
+ * Modified: [2026-11-22 11:05] - v3 transition: sends the module data as written in
+ *                                config.js, shows the notice image instead of the globe
+ * Modified: [2026-11-22 12:07] - switchToStaticIfStale default false: no archive is shipped
  */
-// Modified: 2026-10-22 12:46 - Add sliderPollInterval config option (issue #2)
-// Modified: 2026-10-25 14:10 - Add syncDelay config option, sliderPollInterval default now 10 min
 
 Module.register("MMM-Globe", {
-  defaults: {
-    style: "geoColor",
-    imageSize: 600,
-    ownImagePath: "",
-    updateInterval: 10 * 60 * 1000,  // 10 minutes
-    sliderPollInterval: 10 * 60 * 1000,  // SLIDER cadence (10 min; 15 min for meteosat-0deg), 60s minimum
-    syncDelay: 0,                    // >0 (ms): sync the polls to the publication grid, step size of the titration
-    retryDelay: 30 * 1000,           // retry delay on load failure (30 seconds)
-    enableImageSaving: false,         // save satellite images locally (images/ subfolder)
-    coastlines: false,                // false, "europe", "americas", "asia"
-    clipRadius: null,                 // null = default circle (50%, 44% for centralAmericaDiscNat); number = override clip radius in % (e.g. 48.55 to crop away the EUMETSAT WMS footer)
-    logLevel: "ERROR",                  // "ERROR", "WARN", "INFO", "DEBUG"
-    switchToStaticIfStale: false,      // true: show static fallback images when live feed is stale (>90min unchanged)
-    staleFallbackMarker: "330:75:4:cornflowerblue",  // "off", "X:Y:Px:Color" for dot, or any text for label
-    archiveSunPhase: "",               // "HHMM:HHMM" sunrise:sunset UTC of archive images, e.g. "0730:1830"
-    lat: 52.52,                        // Mirror location latitude (for seasonal sun phase mapping)
-    lon: 13.405                        // Mirror location longitude
-  },
 
-  // SLIDER style names (must match keys in node_helper SLIDER_SATELLITES + alias)
-  SLIDER_STYLES: ["geoColorEurope", "geoColorUSA", "geoColorPacific", "geoColorAsia", "meteosat"],
+	defaults: {
+		style: "europe",
+		imageUrl: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap"
+			+ "&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000"
+			+ "&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",
+		updateInterval: 15 * 60 * 1000,
+		imageSize: 600,
+		clipRadius: 48.55,
+		coastlines: false,
+		switchToStaticIfStale: false,
+		staleFallbackMarker: "off",
+		lat: 52.52,
+		lon: 13.405,
+		enableImageSaving: false,
+		logLevel: "info"
+	},
 
-  start: function() {
-    this.loadedImage = null;
-    this.fallbackText = null;  // Text marker for stale fallback mode
+	getStyles () {
+		return [`${this.name}.css`];
+	},
 
-    // All fetching runs in node_helper — send config once
-    this.sendSocketNotification("START_POLL", {
-      style: this.config.style,
-      imageSize: this.config.imageSize,
-      ownImagePath: this.config.ownImagePath,
-      updateInterval: this.config.updateInterval,
-      sliderPollInterval: this.config.sliderPollInterval,
-      syncDelay: this.config.syncDelay,
-      retryDelay: this.config.retryDelay,
-      enableImageSaving: this.config.enableImageSaving,
-      logLevel: this.config.logLevel,
-      switchToStaticIfStale: this.config.switchToStaticIfStale,
-      staleFallbackMarker: this.config.staleFallbackMarker,
-      archiveSunPhase: this.config.archiveSunPhase,
-      lat: this.config.lat,
-      lon: this.config.lon
-    });
+	start () {
+		this.payload = null;
+		this.dom = null;
+		// data (the entry as written in config.js) and defaults serve the v3 transition.
+		this.sendSocketNotification("GLOBE_CONFIG", { config: this.config, data: this.data, defaults: this.defaults });
+	},
 
-    // Self-recovery: load current.png immediately if it exists (e.g. after browser refresh)
-    var self = this;
-    var currentUrl = "/modules/MMM-Globe/images/current.png?t=" + Date.now();
-    this._loadImage(currentUrl).then(function(result) {
-      if (!result.isError && !self.loadedImage) {
-        self.loadedImage = result.image;
-        self.updateDom(1000);
-      }
-    });
-  },
+	socketNotificationReceived (notification, payload) {
+		if (notification !== "GLOBE_IMAGE") return;
+		this.payload = payload;
+		this.updateDom();
+	},
 
-  // Handle image URL from node_helper
-  socketNotificationReceived: function(notification, payload) {
-    if (notification === "IMAGE_READY") {
-      var self = this;
-      this.fallbackText = payload.fallbackText || null;
-      this._loadImage(payload.url).then(function(result) {
-        if (!result.isError) {
-          self.loadedImage = result.image;
-          self.updateDom(1000);
-        } else {
-          Log.warn("MMM-Globe: Failed to load image from " + payload.url);
-        }
-      });
-    }
-  },
+	getDom () {
+		if (!this.dom) this.dom = this.build();
+		const { wrapper, globe, lines, image, note, notice } = this.dom;
+		const payload = this.payload;
+		const { imageSize, clipRadius } = this.config;
 
-  // Promise based image loader with error handling (module-scoped to avoid global conflicts)
-  _loadImage: function(src) {
-    return new Promise(function(resolve) {
-      var image = new Image();
-      image.onload = function() { resolve({ image: image, isError: false }); };
-      image.onerror = function() { resolve({ image: image, isError: true }); };
-      image.src = src;
-    });
-  },
+		globe.style.display = payload && !payload.notice ? "" : "none";
+		notice.style.display = payload && payload.notice ? "" : "none";
+		note.style.display = "none";
+		if (!payload) return wrapper;
 
-  getStyles: function() {
-    return ["MMM-Globe.css"];
-  },
+		if (payload.notice) {
+			// v3 config found: the notice replaces the globe, at most at its own 400 px.
+			notice.style.width = `${Math.min(imageSize, 400)}px`;
+			this.setSource(notice, payload.notice);
+			return wrapper;
+		}
 
-  getDom: function() {
-    var wrapper = document.createElement("div");
+		globe.style.width = `${imageSize}px`;
+		globe.style.height = `${imageSize}px`;
+		globe.style.clipPath = clipRadius === null ? "" : `circle(${clipRadius}% at 50% 50%)`;
 
-    if (this.loadedImage) {
-      // Optional clip-path override (e.g. 48.55 to crop away the EUMETSAT WMS footer);
-      // null leaves the per-style CSS default (50%, or 44% for centralAmericaDiscNat).
-      var clipOverride = (typeof this.config.clipRadius === "number")
-        ? "circle(" + this.config.clipRadius + "% at 50% 50%)"
-        : null;
+		lines.style.display = payload.overlay ? "" : "none";
+		if (payload.overlay) this.setSource(lines, payload.overlay);
+		this.setSource(image, payload.url);
 
-      // Coastlines only for static styles — SLIDER images have natural coastlines
-      var isSliderStyle = this.SLIDER_STYLES.indexOf(this.config.style) !== -1;
-      var useCoastlines = !isSliderStyle && this.config.coastlines &&
-        ["europe", "americas", "asia"].indexOf(this.config.coastlines) !== -1;
+		const marker = payload.marker;
+		if (marker && marker.type === "text") {
+			note.textContent = marker.text;
+			note.style.display = "";
+		}
+		this.placeDot();
 
-      if (useCoastlines) {
-        var container = document.createElement("div");
-        container.className = "MMM-Globe-container";
+		return wrapper;
+	},
 
-        var coastlines = document.createElement("img");
-        coastlines.className = "MMM-Globe-coastlines";
-        coastlines.src = this.file("coastlines_" + this.config.coastlines + ".png");
-        coastlines.width = this.config.imageSize.toString();
-        coastlines.height = this.config.imageSize.toString();
-        if (clipOverride) { coastlines.style.clipPath = clipOverride; }
-        container.appendChild(coastlines);
+	/* Dot in pixels of the archive image, converted to the display. Only once the image it
+	 * belongs to has loaded — before that the browser does not know its size, and the dot
+	 * would sit on the predecessor still visible. */
+	placeDot () {
+		const { image, dot } = this.dom;
+		const marker = this.payload && this.payload.marker;
+		const ready = image.complete && image.naturalWidth > 0;
+		if (!marker || marker.type !== "dot" || !ready) {
+			dot.style.display = "none";
+			return;
+		}
+		const scale = this.config.imageSize / image.naturalWidth;
+		dot.style.left = `${marker.x * 100 / image.naturalWidth}%`;
+		dot.style.top = `${marker.y * 100 / image.naturalHeight}%`;
+		dot.style.width = `${marker.size * scale}px`;
+		dot.style.height = `${marker.size * scale}px`;
+		dot.style.background = marker.color;
+		dot.style.display = "";
+	},
 
-        var image = this.loadedImage.cloneNode();
-        if (this.config.style === "centralAmericaDiscNat") {
-          image.className = "MMM-Globe-image-centralAmericaDiscNat-blended";
-        } else {
-          image.className = "MMM-Globe-image-blended";
-        }
-        image.width = this.config.imageSize.toString();
-        image.height = this.config.imageSize.toString();
-        if (clipOverride) { image.style.clipPath = clipOverride; }
-        container.appendChild(image);
+	/* The elements in their fixed order: lines below the image, dot above it. */
+	build () {
+		const create = (tag, className, parent) => {
+			const element = document.createElement(tag);
+			element.className = className;
+			parent.appendChild(element);
+			return element;
+		};
+		const wrapper = document.createElement("div");
+		wrapper.className = "mmm-globe";
+		const globe = create("div", "globe", wrapper);
+		const lines = create("img", "coastlines", globe);
+		const image = create("img", "satellite", globe);
+		const dot = create("div", "marker-dot", globe);
+		const note = create("div", "marker-text dimmed", wrapper);
+		const notice = create("img", "notice", wrapper);
+		image.addEventListener("load", () => this.placeDot());
+		return { wrapper, globe, lines, image, dot, note, notice };
+	},
 
-        wrapper.appendChild(container);
-      } else {
-        var image = this.loadedImage.cloneNode();
-        if (this.config.style === "centralAmericaDiscNat") {
-          image.className = "MMM-Globe-image-centralAmericaDiscNat";
-        } else {
-          image.className = "MMM-Globe-image";
-        }
-        image.width = this.config.imageSize.toString();
-        image.height = this.config.imageSize.toString();
-        if (clipOverride) { image.style.clipPath = clipOverride; }
-        var container = document.createElement("div");
-        container.className = "MMM-Globe-container";
-        container.appendChild(image);
-        wrapper.appendChild(container);
-      }
-
-      // Show text marker for stale fallback mode
-      if (this.fallbackText) {
-        var fallbackLabel = document.createElement("div");
-        fallbackLabel.className = "MMM-Globe-fallback-text dimmed";
-        fallbackLabel.textContent = this.fallbackText;
-        wrapper.appendChild(fallbackLabel);
-      }
-    }
-
-    return wrapper;
-  },
-
-  // Passive integration with MMM-PresenceScreenControl:
-  // forward screen on/off state to the backend so retries can be suppressed
-  // while nobody is watching. Works only if PSC is installed and emits this
-  // notification; otherwise the backend keeps its default (screenOn = true).
-  notificationReceived: function(notification, payload) {
-    if (notification === "MMM_PSC-SCREEN_POWERSTATUS" && typeof payload === "boolean") {
-      this.sendSocketNotification("SET_SCREEN_STATE", payload);
-    }
-  }
+	/* Set only a new address; setting the same one again would start a new load. */
+	setSource (element, url) {
+		if (element.getAttribute("src") !== url) element.src = url;
+	}
 });

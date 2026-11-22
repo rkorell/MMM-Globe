@@ -1,774 +1,649 @@
-/* node_helper for MMM-Globe.
- * All image fetching runs here (server-side). The frontend only receives
- * a local file path and handles display.
+/* MMM-Globe — Backend
  *
- * Two polling modes:
- * - pollSlider (SLIDER styles: geoColorEurope/USA/Pacific/Asia, alias "meteosat"):
- *   polls CIRA SLIDER API at configured sliderPollInterval (10 min default,
- *   60s minimum), detects new images by comparing timestamps.
- *   Supports four satellites: Meteosat-0deg, GOES-19, GOES-18, Himawari.
- * - pollStatic (all other styles + ownImagePath): polls at configured
- *   updateInterval.
+ * One cycle for both modes: determine the current state, fetch the image if it is new,
+ * show it, schedule the next run. Everything else is a helper for that. The frontend
+ * checks and decides nothing.
  *
- * Grid sync (syncDelay > 0, SLIDER styles only): the publication phase of the
- * service is unknown at startup, so the module titrates it. The first list
- * fetch is a reference only; from there the list is polled every syncDelay
- * until the newest entry changes. That moment plus syncDelay is the grid
- * origin, and every further poll happens at origin + n * cadence. The cadence
- * is the user's sliderPollInterval; the gaps in the list are measured only to
- * verify it. An empty grid point is followed up to three times at syncDelay
- * and then skipped — neither follow-ups nor interface errors move the grid.
+ * The module knows the publication rhythm only for the sources in sources.js; there it
+ * determines it by titration. An own URL is unknown to it, and it does not try to learn
+ * about it: it is polled at the configured updateInterval.
  *
- * Both modes call downloadAndServe() which downloads the image and writes
- * current.png for the frontend. When enableImageSaving is true, a
- * timestamped copy is also saved to the images/ subfolder.
+ * Stored state: lastId, anchor, since, lastPoll, imagePath, stale, payload.
  *
- * Stale fallback (switchToStaticIfStale): When the live image has not been
- * updated for 90 minutes (via Last-Modified header), the module serves
- * pre-rendered static images from the static/ subfolder, matched to the
- * current UTC time. A configurable dot or text marker indicates archive mode.
+ * Modified: [2026-11-02 21:17] - Created
+ * Modified: [2026-11-11 14:38] - Recreated as MMM-Globus-Neu2 after QA: titration and
+ *                                grid for the own URL as well, archive mode by age of the
+ *                                live image instead of a miss counter (works without an
+ *                                anchor too), re-anchor after archive mode, anchor at poll
+ *                                start, only newer register ids, atomic write, config
+ *                                check, payload only on change, paths from the module
+ *                                name, stop()
+ * Modified: [2026-11-11 16:05] - Own URL back to a fixed interval without titration;
+ *                                archive choice by day phase instead of sun altitude; log
+ *                                per level via the matching console method, logLevel
+ *                                case-insensitive, single attempts at debug, fetch failure
+ *                                as warn; image check inside the retry loop; empty archive
+ *                                reported once at start; stalled source as warn
+ * Modified: [2026-11-11 16:09] - Dot marker in archive image pixels with defaults for size
+ *                                and colour, free text label instead of "text", coastlines
+ *                                only with own URL, start line in the log
+ * Modified: [2026-11-11 16:25] - updateInterval null, "" or 0 gives the default instead of
+ *                                the minimum
+ * Modified: [2026-11-12 10:38] - Fetch errors in the log with the cause from error.cause
+ * Modified: [2026-11-12 10:46] - staleFallbackMarker "off" in any case
+ * Modified: [2026-11-12 11:01] - All comments and log messages in English
+ * Modified: [2026-11-12 11:29] - Payload without imageSize and clipRadius, the frontend
+ *                                reads them from its config; comment on the re-anchor
+ *                                after an outage restored
+ * Modified: [2026-11-12 11:33] - check() stores the config itself and returns true/false
+ * Modified: [2026-11-22 11:05] - v3 transition: a v3 entry gets new_globe_config.js and the
+ *                                notice image instead of the globe; createHash imported
+ *                                directly, "crypto" collides with the browser global in lint
+ * Modified: [2026-11-22 11:42] - Start warning on an unusable archive names v3-named images
+ *                                and the v3 example
+ * Modified: [2026-11-22 11:57] - The v3 transition logs the archive check as well
+ * Modified: [2026-11-22 12:07] - switchToStaticIfStale default false, as in v3
+ * Modified: [2026-11-22 12:11] - new_globe_config.js removed after the first valid v4 start
  */
-// Modified: 2026-06-04 - Validate PNG/JPEG/GIF magic bytes, retry on validation failure (PSC-aware)
-// Modified: 2026-06-04 - Lazy-load static fallback index (only when first stale event triggers)
-// Modified: 2026-10-22 12:46 - Add sliderPollInterval config option, clamped to 60s minimum (issue #2)
-// Modified: 2026-10-22 23:40 - Single SLIDER poll timer; keep slot open when the image download fails (issue #2)
-// Modified: 2026-10-25 14:10 - Add syncDelay grid sync, raise sliderPollInterval default to 10 min, retry all interface errors
 
 const NodeHelper = require("node_helper");
-const https = require("https");
-const http = require("http");
+const SunCalc = require("suncalc");
+const { createHash } = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
-const { execSync } = require("child_process");
-const SunCalc = require("suncalc");
 
-const SLIDER_BASE_URL = "https://slider.cira.colostate.edu";
-const SLIDER_PRODUCT = "full_disk/geocolor";
-const SLIDER_SATELLITES = {
-  geoColorEurope:  "meteosat-0deg",
-  geoColorUSA:     "goes-19",
-  geoColorPacific: "goes-18",
-  geoColorAsia:    "himawari"
+const { SOURCES, SYNC_INTERVAL, BUFFER, registerUrl, readId, imageUrl, fileStamp } = require("./sources");
+
+const DAY = 24 * 60 * 60 * 1000;
+const STALE_LIMIT = 6;          // missed publications until archive mode
+const REQUEST_TIMEOUT = 30000;  // per attempt
+const ATTEMPTS = 3;
+const RETRY_DELAY = 10000;
+const MIN_UPDATE_INTERVAL = 5 * 60 * 1000;
+const DEFAULT_UPDATE_INTERVAL = 15 * 60 * 1000;
+
+const LEVELS = ["error", "warn", "info", "debug"];
+const COASTLINES = ["europe", "americas", "pacific", "asia"];
+const ARCHIVE_FILE = /^\d{8}-\d{4}\.(jpg|png|gif)$/;
+const MARKER_DOT = /^(\d+):(\d+)(?::(\d+))?(?::(\S+))?$/;
+const IMAGE_DIR = path.join(__dirname, "images");
+const STATIC_DIR = path.join(__dirname, "static");
+const CURRENT = path.join(IMAGE_DIR, "current.png");
+const TRANSITION_FILE = path.join(__dirname, "new_globe_config.js");
+
+// v3 transition. v3 style names and their v4 successor: the frozen Himawari-8 styles and
+// the broken GOES-16 style map to the live SLIDER view of the same region, the discontinued
+// EUMETSAT styles to the WMS default.
+const V3_STYLES = {
+	geoColorEurope: "europe", meteosat: "europe", geoColorUSA: "americas",
+	geoColorPacific: "pacific", geoColorAsia: "asia",
+	geoColor: "asia", natColor: "asia", airMass: "asia", fullBand: "asia",
+	centralAmericaDiscNat: "americas", europeDiscNat: "", europeDiscSnow: ""
 };
-const SLIDER_POLL_INTERVAL = 10 * 60 * 1000;  // default for config.sliderPollInterval
-const SLIDER_MIN_INTERVAL = 60 * 1000;        // no two SLIDER requests are ever closer than this
-const SYNC_FOLLOWUP_STEPS = 3;                // follow-up attempts at syncDelay when a grid point is empty
-const HTTP_TIMEOUT = 15 * 1000;       // timeout for JSON/small requests
-const HTTP_TIMEOUT_IMAGE = 30 * 1000; // timeout for image downloads
-const STALE_THRESHOLD_MS = 90 * 60 * 1000;  // 90 min — image older than this triggers fallback (Last-Modified)
-const STALE_HASH_COUNT = 9;                  // 9 identical polls — hash-based fallback when no Last-Modified (9 × 10min = 90min)
-const RETRY_DELAYS_MS = [30 * 1000, 90 * 1000];  // Backoff sequence for retries after validation failure
-const RETRY_MAX = RETRY_DELAYS_MS.length;
-
-// Log levels: ERROR (default) < WARN < INFO < DEBUG
-const LOG_LEVELS = { ERROR: 0, WARN: 1, INFO: 2, DEBUG: 3 };
-
-// Image URL maps (standard resolution / hi-res)
-const IMAGE_URLS = {
-  natColor: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest/himawari-8/full_disk_ahi_natural_color.jpg",
-  geoColor: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest/himawari-8/full_disk_ahi_true_color.jpg",
-  airMass: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest/himawari-8/full_disk_ahi_rgb_airmass.jpg",
-  fullBand: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest/himawari-8/himawari-8_band_03_sector_02.gif",
-  europeDiscNat: "https://eumetview.eumetsat.int/static-images/latestImages/EUMETSAT_MSG_RGBNatColourEnhncd_LowResolution.jpg",
-  europeDiscSnow: "https://eumetview.eumetsat.int/static-images/latestImages/EUMETSAT_MSG_RGBSolarDay_LowResolution.jpg",
-  centralAmericaDiscNat: "https://cdn.star.nesdis.noaa.gov/GOES16/ABI/FD/GEOCOLOR/678x678.jpg"
+const V3_SLIDER = ["geoColorEurope", "meteosat", "geoColorUSA", "geoColorPacific", "geoColorAsia"];  // ignored ownImagePath
+const V3_REMOVED = ["sliderPollInterval", "syncDelay", "retryDelay", "archiveSunPhase", "ownImagePath"];
+const V3_DEFAULTS = {  // where they differ from v4
+	updateInterval: "10 min", clipRadius: "null, i.e. 50 %",
+	staleFallbackMarker: "\"330:75:4:cornflowerblue\"", logLevel: "\"ERROR\""
 };
-// Validate that a buffer starts with a known image signature (PNG/JPEG/GIF).
-// Rejects XML/HTML error bodies, empty responses, and plain text — the kinds
-// of payload some upstream APIs (notably the EUMETSAT WMS) return with HTTP
-// 200 under load.
-function isValidImageBuffer(buffer) {
-  if (!buffer || buffer.length < 4) return false;
-  // PNG: 89 50 4E 47 0D 0A 1A 0A
-  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) return true;
-  // JPEG: FF D8 FF
-  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) return true;
-  // GIF: 47 49 46 38 ("GIF8" — both 87a and 89a)
-  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return true;
-  return false;
-}
-
-const HIRES_IMAGE_URLS = {
-  natColor: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest_hi_res/himawari-8/full_disk_ahi_natural_color.jpg",
-  geoColor: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest_hi_res/himawari-8/full_disk_ahi_true_color.jpg",
-  airMass: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest_hi_res/himawari-8/full_disk_ahi_rgb_airmass.jpg",
-  fullBand: "https://rammb.cira.colostate.edu/ramsdis/online/images/latest/himawari-8/himawari-8_band_03_sector_02.gif",
-  europeDiscNat: "https://eumetview.eumetsat.int/static-images/latestImages/EUMETSAT_MSG_RGBNatColourEnhncd_LowResolution.jpg",
-  europeDiscSnow: "https://eumetview.eumetsat.int/static-images/latestImages/EUMETSAT_MSG_RGBSolarDay_LowResolution.jpg",
-  centralAmericaDiscNat: "https://cdn.star.nesdis.noaa.gov/GOES16/ABI/FD/GEOCOLOR/1808x1808.jpg"
-};
+const V3_EXAMPLE = "773ba5d25b3c8e3537e52d7cb8c06a00e66f2434";  // sha1 of the shipped static/1200.jpg
+const V4_STYLES = ["europe", "americas", "pacific", "asia", ""];
+const V4_OPTIONS = ["style", "imageUrl", "updateInterval", "imageSize", "clipRadius", "coastlines",
+	"switchToStaticIfStale", "staleFallbackMarker", "lat", "lon", "enableImageSaving", "logLevel"];
 
 module.exports = NodeHelper.create({
-  lastTimestamp: null,
-  lastImageHash: null,
-  polling: false,
-  config: null,
-  staticUrl: null,
-  sliderSatPath: null,
-  sliderTimer: null,   // the one pending SLIDER poll (see rescheduleSlider)
-  syncDelay: 0,             // 0 = grid sync off (default)
-  syncEnabled: false,       // sync armed and cadence verified
-  syncRefTimestamp: null,   // newest list entry seen at the previous fetch
-  syncOrigin: 0,            // grid origin (epoch ms); 0 = still titrating
-  syncFollowUps: 0,         // follow-up attempts spent on the current grid point
-  logLevel: 0,
-  imagesDir: null,
-  staleFallbackActive: false,
-  staticFallbackImages: [],
-  staleCount: 0,
-  screenOn: true,   // Optimistic default — overridden via SET_SCREEN_STATE if PSC is present
-  staticFallbackIndexed: false,   // Lazy: static/ folder is scanned on first stale event, not at startup
 
-  log: function(level, msg) {
-    if (LOG_LEVELS[level] > this.logLevel) {
-      return;
-    }
-    if (level === "ERROR") {
-      console.error(msg);
-    } else if (level === "WARN") {
-      console.warn(msg);
-    } else {
-      console.log(msg);
-    }
-  },
+	start () {
+		this.running = false;
+	},
 
-  ensureImagesDir: function() {
-    if (!this.imagesDir) {
-      this.imagesDir = path.join(__dirname, "images");
-    }
-    if (!fs.existsSync(this.imagesDir)) {
-      fs.mkdirSync(this.imagesDir);
-    }
-    return this.imagesDir;
-  },
+	stop () {
+		clearTimeout(this.timer);
+	},
 
-  socketNotificationReceived: function(notification, payload) {
-    if (notification === "START_POLL") {
-      if (this.polling) {
-        return;
-      }
-      this.polling = true;
-      this.config = payload;
-      this.logLevel = LOG_LEVELS[payload.logLevel] !== undefined
-        ? LOG_LEVELS[payload.logLevel] : LOG_LEVELS.ERROR;
-      this.setupAndPoll();
-    } else if (notification === "SET_SCREEN_STATE") {
-      if (typeof payload === "boolean") {
-        this.screenOn = payload;
-        this.log("DEBUG", "Screen state updated via PSC: " + payload);
-      }
-    }
-  },
+	socketNotificationReceived (notification, { config, data, defaults }) {
+		if (notification !== "GLOBE_CONFIG") return;
 
-  setupAndPoll: function() {
-    var config = this.config;
+		// A reload sends the config again. The cycle starts exactly once; after that the
+		// frontend only gets the last payload sent.
+		if (this.running) {
+			if (this.payload) this.sendSocketNotification("GLOBE_IMAGE", this.payload);
+			return;
+		}
+		this.running = true;
 
-    // Backwards compatibility: "meteosat" is an alias for "geoColorEurope"
-    var style = config.style === "meteosat" ? "geoColorEurope" : config.style;
+		this.web = `/modules/${this.name}`;
+		if (this.isV3(data.config)) {
+			this.transition(data, defaults);
+			return;
+		}
+		if (!this.check(config)) return;
+		this.removeTransitionFile();
 
-    // SLIDER styles: all geoColor* satellites
-    var satPath = SLIDER_SATELLITES[style];
-    if (satPath) {
-      this.sliderSatPath = satPath;
-      console.log("Started (mode: SLIDER/" + satPath + ", logLevel: " + config.logLevel + ")");
+		this.lastId = null;        // id or checksum of the live image shown
+		this.anchor = null;        // time of an observed change; null = titration
+		this.since = Date.now();   // last new live image, initially the start
+		this.lastPoll = null;      // start of the previous poll
+		this.imagePath = null;
+		this.stale = false;
+		this.payload = null;
 
-      // Poll interval is configurable, but never below 60s — the SLIDER API is a
-      // third-party service and publishes a new image only every 10-15 minutes.
-      var pollInterval = Number(config.sliderPollInterval) || SLIDER_POLL_INTERVAL;
-      if (pollInterval < SLIDER_MIN_INTERVAL) {
-        this.log("WARN", "sliderPollInterval " + pollInterval + "ms is below the minimum, using "
-          + SLIDER_MIN_INTERVAL + "ms");
-        pollInterval = SLIDER_MIN_INTERVAL;
-      }
-      this.sliderPollInterval = pollInterval;
+		try {
+			fs.mkdirSync(IMAGE_DIR, { recursive: true });
+		} catch (error) {
+			this.log("error", `Cannot create image directory: ${error.message}`);
+			return;
+		}
+		this.log("info", this.source
+			? `Start: style ${this.config.style} (${this.source.sat}), cadence ${this.cadence / 60000} min, grid by titration.`
+			: `Start: own URL, fixed interval ${this.cadence / 60000} min.`);
+		const problem = this.config.switchToStaticIfStale ? this.archiveProblem() : null;
+		if (problem) this.log("warn", problem);
+		this.tick();
+	},
 
-      // Grid sync: syncDelay is both the titration step and the follow-up step.
-      // It never falls below the 60s floor that applies to every SLIDER request,
-      // and a value at or above the cadence would skip whole slots.
-      var syncDelay = Number(config.syncDelay) || 0;
-      if (syncDelay > 0 && syncDelay < SLIDER_MIN_INTERVAL) {
-        this.log("WARN", "syncDelay " + syncDelay + "ms is below the minimum, using "
-          + SLIDER_MIN_INTERVAL + "ms");
-        syncDelay = SLIDER_MIN_INTERVAL;
-      }
-      if (syncDelay >= pollInterval) {
-        if (syncDelay > 0) {
-          this.log("ERROR", "syncDelay " + (syncDelay / 1000) + "s must be smaller than"
-            + " sliderPollInterval " + (pollInterval / 1000) + "s — sync disabled,"
-            + " polling at the configured interval");
-        }
-        syncDelay = 0;
-      }
-      this.syncDelay = syncDelay;
-      this.syncEnabled = syncDelay > 0;
+	/* Archive mode is enabled: why static/ holds nothing v4 can use, or null if it does. */
+	archiveProblem () {
+		if (this.archiveFiles().length) return null;
+		const v3 = this.v3ArchiveFiles();
+		if (v3.length) {
+			const one = v3.length === 1;
+			return `Archive mode is enabled, but the ${v3.length} archive image${one ? "" : "s"} in static/ ${one ? "uses" : "use"} the v3 naming (HHMM.jpg), which v4 does not use. `
+				+ "Rename each to YYYYMMDD-HHMM.jpg with the UTC date and time it was taken, or build a new archive with enableImageSaving — see README, \"Archive mode\".";
+		}
+		const example = fs.existsSync(path.join(STATIC_DIR, "1200.jpg")) ? " static/1200.jpg is the v3 example, which v4 does not use." : "";
+		return `Archive mode is enabled, but static/ contains no archive images — if the source stalls, the last live image stays.${example}`;
+	},
 
-      this.log("DEBUG", "SLIDER poll interval: " + (this.sliderPollInterval / 1000) + "s"
-        + (this.syncEnabled ? ", grid sync with " + (this.syncDelay / 1000) + "s steps" : ""));
-      this.pollSlider();
-      return;
-    }
+	/* ---------- v3 transition ---------- */
 
-    var mode = config.ownImagePath ? "ownImagePath" : config.style;
-    console.log("Started (mode: " + mode + ", logLevel: " + config.logLevel + ")");
+	isV3 (raw = {}) {
+		return Object.hasOwn(V3_STYLES, raw.style) || V3_REMOVED.some((key) => key in raw);
+	},
 
-    // Determine static URL for all non-SLIDER styles
-    if (config.ownImagePath) {
-      this.staticUrl = config.ownImagePath;
-    } else if (config.imageSize > 800) {
-      this.staticUrl = HIRES_IMAGE_URLS[config.style];
-    } else {
-      this.staticUrl = IMAGE_URLS[config.style];
-    }
+	/* Archive images in the v3 naming HHMM.jpg, without the unchanged v3 example 1200.jpg. */
+	v3ArchiveFiles () {
+		try {
+			return fs.readdirSync(STATIC_DIR).filter((f) => /^\d{4}\.jpg$/.test(f)
+				&& !(f === "1200.jpg" && createHash("sha1").update(fs.readFileSync(path.join(STATIC_DIR, f))).digest("hex") === V3_EXAMPLE));
+		} catch {
+			return [];
+		}
+	},
 
-    this.log("DEBUG", "Static poll interval: " + (config.updateInterval / 1000) + "s, URL: " + this.staticUrl);
-    this.pollStatic();
-  },
+	/* Write a complete v4 entry next to the module and show the notice image instead of the
+	 * globe. Logged regardless of logLevel. */
+	transition (data, defaults) {
+		try {
+			fs.writeFileSync(TRANSITION_FILE, this.v4Config(data, defaults));
+			console.warn(`Your configuration is written for v3. A complete v4 configuration is in ${TRANSITION_FILE}.`);
+		} catch (error) {
+			console.error(`Your configuration is written for v3; writing ${TRANSITION_FILE} failed: ${error.message}. See the README, section "Upgrading from v3".`);
+		}
+		const problem = data.config.switchToStaticIfStale ? this.archiveProblem() : null;
+		if (problem) console.warn(problem);
+		this.payload = { notice: `${this.web}/MMM-Globe-Configuration-Has-Changed.png` };
+		this.sendSocketNotification("GLOBE_IMAGE", this.payload);
+	},
 
-  // --- Static fallback for stale images ---
+	/* After a valid v4 start the file of the transition has served its purpose. Only then:
+	 * with a mistyped config it is still there to compare. */
+	removeTransitionFile () {
+		if (!fs.existsSync(TRANSITION_FILE)) return;
+		try {
+			fs.rmSync(TRANSITION_FILE);
+			console.info(`${TRANSITION_FILE} removed — the move to v4 is complete.`);
+		} catch (error) {
+			this.log("warn", `Cannot remove ${TRANSITION_FILE}: ${error.message}`);
+		}
+	},
 
-  loadStaticFallbackImages: function() {
-    var staticDir = path.join(__dirname, "static");
-    try {
-      var files = fs.readdirSync(staticDir);
-      this.staticFallbackImages = files
-        .filter(function(f) { return /^\d{4}\.jpg$/.test(f); })
-        .map(function(f) { return f.replace(".jpg", ""); })
-        .sort();
-      this.log("INFO", "Loaded " + this.staticFallbackImages.length + " static fallback images");
-    } catch (e) {
-      this.staticFallbackImages = [];
-      this.log("WARN", "No static fallback images found: " + e.message);
-    }
-  },
+	/* The complete v4 entry as JavaScript text, with the changes listed on top. Only
+	 * unambiguous values are carried over; everything else gets the v4 default and a
+	 * comment. data is the module entry as written in config.js. */
+	v4Config (data, defaults) {
+		const raw = data.config || {};
+		const notes = [];
+		const value = {};
+		const comment = {};
 
-  // Map current UTC time to archive time using three-segment interpolation
-  // Adjusts for seasonal daylight differences between archive date and today
-  mapToArchiveTime: function(now) {
-    var config = this.config;
-    var parts = config.archiveSunPhase.split(":");
-    if (parts.length !== 2) return null;
+		for (const key of V4_OPTIONS) {
+			if (key in raw) {
+				value[key] = raw[key];
+				comment[key] = "from your v3 config";
+			} else {
+				value[key] = defaults[key];
+				comment[key] = V3_DEFAULTS[key] ? `v4 default — v3 default was ${V3_DEFAULTS[key]}` : "v4 default";
+			}
+		}
 
-    var archiveSunrise = parseInt(parts[0].substring(0, 2), 10) * 60 + parseInt(parts[0].substring(2, 4), 10);
-    var archiveSunset = parseInt(parts[1].substring(0, 2), 10) * 60 + parseInt(parts[1].substring(2, 4), 10);
+		const old = raw.style;
+		if (V3_SLIDER.includes(old)) {
+			value.style = V3_STYLES[old];
+			comment.style = `v4: was "${old}"`;
+			if (raw.ownImagePath) notes.push("ownImagePath was ignored by v3 with your style and is left out.");
+		} else if (raw.ownImagePath) {
+			value.style = "";
+			value.imageUrl = raw.ownImagePath;
+			comment.style = "v4: \"\" uses imageUrl";
+			comment.imageUrl = "v4: was ownImagePath";
+		} else if (V4_STYLES.includes(old)) {
+			// already a v4 name
+		} else if (Object.hasOwn(V3_STYLES, old ?? "geoColor")) {
+			const name = old ?? "geoColor";
+			value.style = V3_STYLES[name];
+			comment.style = `CHECK — v4: was "${name}"${old ? "" : " (v3 default)"}, which no longer works`;
+			if (value.style === "") {
+				comment.imageUrl = `v4: EUMETSAT WMS, replaces "${name}"`;
+				if (!raw.coastlines) {
+					value.coastlines = "europe";
+					comment.coastlines = `v4: the WMS has no coastlines, "${name}" had`;
+				}
+			}
+		} else {
+			comment.style = `CHECK — your value "${old}" is unknown, v4 default`;
+			value.style = defaults.style;
+		}
+		if (raw.clipRadius === null) {
+			value.clipRadius = defaults.clipRadius;
+			comment.clipRadius = "CHECK — your v3 value null now means \"no clipping\"; v4 default";
+		}
+		if (value.style && raw.coastlines) comment.coastlines = "CHECK — applies only with style \"\" (own URL)";
 
-    var sunTimes = SunCalc.getTimes(now, config.lat, config.lon);
-    var currentSunrise = sunTimes.sunrise.getUTCHours() * 60 + sunTimes.sunrise.getUTCMinutes();
-    var currentSunset = sunTimes.sunset.getUTCHours() * 60 + sunTimes.sunset.getUTCMinutes();
+		for (const key of V3_REMOVED) {
+			if (key in raw && key !== "ownImagePath") notes.push(`${key}: no longer used, left out.`);
+		}
+		for (const key of Object.keys(raw)) {
+			if (!V4_OPTIONS.includes(key) && !V3_REMOVED.includes(key)) notes.push(`${key}: unknown option, left out.`);
+		}
+		// v3 archive images are named HHMM.jpg. Only the user knows the date of each, so the
+		// note names the ways and renames nothing.
+		const archive = raw.switchToStaticIfStale ? this.v3ArchiveFiles() : [];
+		if (archive.length) {
+			notes.push(`Archive: static/ holds ${archive.length} archive image${archive.length === 1 ? "" : "s"} in the v3 naming (HHMM.jpg). v4 does not use\n`
+				+ " *     them: it names archive images YYYYMMDD-HHMM.jpg, with the UTC date and time each image\n"
+				+ " *     was taken, and uses the date to match day and night. Two ways:\n"
+				+ " *     1. Rename your images yourself, each with the date and time it was taken.\n"
+				+ " *     2. Build a new archive: with enableImageSaving: true the module saves every live image\n"
+				+ " *        under images/, already named correctly; copy the ones you want to static/.");
+		}
 
-    var currentMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-    var mappedMinutes;
+		// Whole minutes are written as in the README, e.g. 15 * 60 * 1000.
+		const text = (key, val) => (key === "updateInterval" && Number.isInteger(val / 60000) ? `${val / 60000} * 60 * 1000` : JSON.stringify(val));
+		const line = (indent, key, val, note, last) => `${`${indent}${key}: ${text(key, val)}${last ? "" : ","}`.padEnd(47)} // ${note}`;
+		const entries = [];
+		for (const key of ["position", "header", "animateIn", "animateOut", "hiddenOnStartup"]) {
+			if (data[key] !== undefined) entries.push(line("\t", key, data[key], "from your v3 config"));
+		}
+		if (data.order) entries.push(line("\t", "order", data.order, "from your v3 config"));
+		const classes = String(data.classes || "").replace(/\s*\bMMM-Globe$/, "");
+		if (classes) entries.push(line("\t", "classes", classes, "from your v3 config"));
+		const options = V4_OPTIONS.map((key, i) => line("\t\t", key, value[key], comment[key], i === V4_OPTIONS.length - 1));
 
-    if (currentMinutes <= currentSunrise) {
-      // Segment 1: Night before sunrise
-      var factor = currentSunrise > 0 ? currentMinutes / currentSunrise : 0;
-      mappedMinutes = Math.round(factor * archiveSunrise);
-    } else if (currentMinutes <= currentSunset) {
-      // Segment 2: Daytime
-      var factor = (currentMinutes - currentSunrise) / (currentSunset - currentSunrise);
-      mappedMinutes = Math.round(archiveSunrise + factor * (archiveSunset - archiveSunrise));
-    } else {
-      // Segment 3: Night after sunset
-      var nightLength = 1440 - currentSunset;
-      var factor = nightLength > 0 ? (currentMinutes - currentSunset) / nightLength : 0;
-      mappedMinutes = Math.round(archiveSunset + factor * (1440 - archiveSunset));
-    }
+		return [
+			"/* MMM-Globe v4 — complete configuration, ready to copy into config.js.",
+			" *",
+			" * Your config.js has NOT been changed, and your own comments in it are not included here.",
+			" * Replace your MMM-Globe entry with the block below and check the lines marked CHECK.",
+			...(notes.length ? [" * Further changes compared with your v3 configuration:", ...notes.map((n) => ` *   - ${n}`)] : []),
+			" * All options: README, section \"Configuration\"; the move: section \"Upgrading from v3\".",
+			" */",
+			"{",
+			"\tmodule: \"MMM-Globe\",",
+			...entries,
+			"\tconfig: {",
+			...options,
+			"\t}",
+			"},",
+			""
+		].join("\n");
+	},
 
-    mappedMinutes = Math.max(0, Math.min(1439, mappedMinutes));
-    var hh = ("0" + Math.floor(mappedMinutes / 60)).slice(-2);
-    var mm = ("0" + (mappedMinutes % 60)).slice(-2);
-    return hh + mm;
-  },
+	/* ---------- Configuration ---------- */
 
-  serveStaticFallback: function() {
-    if (!this.staticFallbackIndexed) {
-      this.loadStaticFallbackImages();
-      this.staticFallbackIndexed = true;
-    }
-    if (this.staticFallbackImages.length === 0) return;
+	/* Checks only what would otherwise lead to misbehaviour and stores the cleaned config
+	 * in this.config. Returns false if the module cannot work with it. */
+	check (raw) {
+		const config = { ...raw, logLevel: String(raw.logLevel || "").toLowerCase() };
+		this.config = config;   // set first, so that log() works already here
+		if (!LEVELS.includes(config.logLevel)) {
+			config.logLevel = "info";
+			this.log("warn", `logLevel "${raw.logLevel}" is unknown — using "info".`);
+		}
 
-    var now = new Date();
-    var currentHHMM;
+		if (config.style) {
+			if (!Object.hasOwn(SOURCES, config.style)) {
+				this.log("error", `style "${config.style}" is unknown — allowed are ${Object.keys(SOURCES).join(", ")} or "" for imageUrl. The module stays empty.`);
+				return false;
+			}
+			this.source = SOURCES[config.style];
+			this.cadence = this.source.cadence;
+		} else {
+			if (!config.imageUrl) {
+				this.log("error", "Neither style nor imageUrl is set — the module stays empty.");
+				return false;
+			}
+			const interval = Number(config.updateInterval);
+			this.source = null;
+			// Number(null) and Number("") are 0 — only a number above 0 is a value.
+			this.cadence = interval > 0 ? Math.max(interval, MIN_UPDATE_INTERVAL) : DEFAULT_UPDATE_INTERVAL;
+			if (this.cadence !== interval) {
+				this.log("warn", `updateInterval "${config.updateInterval}" is invalid or too small — using ${this.cadence / 60000} min.`);
+			}
+		}
 
-    // Apply seasonal sun phase mapping if configured
-    if (this.config.archiveSunPhase) {
-      var mapped = this.mapToArchiveTime(now);
-      if (mapped) {
-        currentHHMM = mapped;
-        this.log("DEBUG", "Archive time mapping: UTC " +
-          ("0" + now.getUTCHours()).slice(-2) + ":" + ("0" + now.getUTCMinutes()).slice(-2) +
-          " → archive " + mapped.substring(0, 2) + ":" + mapped.substring(2, 4) +
-          " (archiveSunPhase: " + this.config.archiveSunPhase + ")");
-      } else {
-        currentHHMM = ("0" + now.getUTCHours()).slice(-2) + ("0" + now.getUTCMinutes()).slice(-2);
-      }
-    } else {
-      currentHHMM = ("0" + now.getUTCHours()).slice(-2) + ("0" + now.getUTCMinutes()).slice(-2);
-    }
+		// The coastline overlays belong to the own URL; the SLIDER images do not need them.
+		if (config.coastlines && config.style) {
+			this.log("warn", "coastlines only applies to imageUrl — ignored with a style.");
+			config.coastlines = false;
+		} else if (config.coastlines && !COASTLINES.includes(config.coastlines)) {
+			this.log("warn", `coastlines "${config.coastlines}" is unknown — allowed are ${COASTLINES.join(", ")}. No coastlines.`);
+			config.coastlines = false;
+		}
 
-    var chosen = this.staticFallbackImages[0]; // default: first image
+		config.marker = this.marker(config.staleFallbackMarker);
+		return true;
+	},
 
-    if (this.staticFallbackImages.length > 1) {
-      // Find nearest image to target time
-      for (var i = 0; i < this.staticFallbackImages.length; i++) {
-        if (this.staticFallbackImages[i] <= currentHHMM) {
-          chosen = this.staticFallbackImages[i];
-        } else {
-          break;
-        }
-      }
-    }
+	/* "off" | "X:Y[:Px[:Colour]]" for a dot | any other text as a label.
+	 * X, Y and Px are pixels in the archive image, from the top left. */
+	marker (raw) {
+		const value = String(raw || "off");
+		if (value.toLowerCase() === "off") return null;
 
-    var self = this;
-    var srcFile = path.join(__dirname, "static", chosen + ".jpg");
-    var saveDir = this.ensureImagesDir();
-    var currentFile = path.join(saveDir, "current.png");
-    var marker = this.config.staleFallbackMarker || "off";
+		const dot = value.match(MARKER_DOT);
+		if (!dot) return { type: "text", text: value };
+		return {
+			type: "dot", x: Number(dot[1]), y: Number(dot[2]),
+			size: dot[3] ? Number(dot[3]) : 4, color: dot[4] || "cornflowerblue"
+		};
+	},
 
-    try {
-      // Apply dot marker via Python/Pillow, or just copy
-      var dotCmd = (marker !== "off") ? this.buildDotCommand(srcFile, currentFile, marker) : null;
-      if (dotCmd) {
-        try {
-          execSync(dotCmd);
-        } catch (pyErr) {
-          self.log("WARN", "Dot marker failed (Pillow installed?), serving without marker: " + pyErr.message);
-          fs.copyFileSync(srcFile, currentFile);
-        }
-      } else {
-        fs.copyFileSync(srcFile, currentFile);
-      }
+	/* ---------- Cycle ---------- */
 
-      // Determine text marker for frontend (non-dot, non-off markers)
-      var textMarker = null;
-      if (marker !== "off" && !dotCmd) {
-        textMarker = marker;
-      }
+	async tick () {
+		const started = Date.now();
+		const before = this.lastId;
+		let fresh = false;
+		try {
+			fresh = this.source ? await this.pollRegister() : await this.pollPlain();
+		} catch (error) {
+			this.log("error", `Unexpected error in poll cycle: ${error.message}`);
+		}
 
-      self.sendSocketNotification("IMAGE_READY", {
-        url: "/modules/MMM-Globe/images/current.png?t=" + Date.now(),
-        isFallback: true,
-        fallbackText: textMarker
-      });
-      if (!self.staleFallbackActive) {
-        self.log("INFO", "Stale image detected (90min unchanged), showing static fallback " + chosen + ".jpg");
-        self.staleFallbackActive = true;
-      }
-    } catch (err) {
-      self.log("ERROR", "Failed to serve static fallback: " + err.message);
-    }
-  },
+		if (this.source) this.titrate(fresh, before, started);
+		if (fresh) this.since = Date.now();
+		this.lastPoll = started;
 
-  // Build Python one-liner to draw a dot marker on image
-  // Format: "X:Y:Px:Color" — returns null if marker is not a dot format
-  buildDotCommand: function(srcFile, outFile, marker) {
-    var dotMatch = marker.match(/^(\d+):(\d+)(?::(\d+))?(?::(.+))?$/);
-    if (!dotMatch) return null;
-    var x = parseInt(dotMatch[1], 10);
-    var y = parseInt(dotMatch[2], 10);
-    var px = dotMatch[3] ? parseInt(dotMatch[3], 10) : 4;
-    var color = (dotMatch[4] || "cornflowerblue").replace(/[^a-zA-Z0-9#]/g, "");
-    var r = Math.floor(px / 2);
-    return "python3 -c \"from PIL import Image,ImageDraw; "
-      + "img=Image.open('" + srcFile + "').convert('RGB'); "
-      + "ImageDraw.Draw(img).ellipse([" + (x - r) + "," + (y - r) + "," + (x + r) + "," + (y + r) + "],fill='" + color + "'); "
-      + "img.save('" + outFile + "')\"";
-  },
+		try {
+			this.send();
+		} catch (error) {
+			this.log("error", `Unexpected error while sending: ${error.message}`);
+		}
+		this.schedule(started);
+	},
 
-  // --- SLIDER polling (geoColorEurope/USA/Pacific/Asia) ---
-  // Polls latest_times.json at sliderPollInterval, detects new images by timestamp comparison.
+	/* Keep the grid of a known source: set the anchor, release it after an outage. */
+	titrate (fresh, before, started) {
+		if (fresh) {
+			if (this.stale && this.anchor !== null) {
+				// After an outage of days or weeks the source may return with a different grid.
+				this.anchor = null;
+				this.log("info", "Source delivers again — determining the grid anew.");
+			} else if (this.anchor === null && before !== null && this.lastPoll !== null
+				&& started - this.lastPoll <= 2 * SYNC_INTERVAL) {
+				// The anchor is only set on a closely observed change. The first image after
+				// start only shows what was already there; a change after a long pause does
+				// not reveal when it happened.
+				this.anchor = started;
+				this.log("info", `Anchor set: ${new Date(this.anchor).toISOString()}`);
+			}
+		} else if (this.anchor !== null) {
+			// A publication is missing. It will not come later; the gap stays, the next
+			// image comes on the grid.
+			this.log("info", "No new image — gap, staying on the grid.");
+		}
+	},
 
-  // Every SLIDER path plans its successor through here, and the previous timer is
-  // cleared first, so exactly one poll is ever pending. Needed because the timeout
-  // handler calls req.destroy(), which emits an additional error event: without
-  // this, the timeout path and the error path it triggers would each plan a
-  // successor and the poll chain would double with every timeout. Already doubled
-  // chains collapse back to one at their next reschedule, without a restart.
-  rescheduleSlider: function(delay) {
-    var self = this;
-    clearTimeout(this.sliderTimer);
-    this.sliderTimer = setTimeout(function() { self.pollSlider(); }, delay);
-  },
+	/* Source with a register: first the id, the image only for a newer one. An older id
+	 * would come from a lagging cache and bring back a replaced image. */
+	async pollRegister () {
+		const json = await this.fetchJson(registerUrl(this.source));
+		if (!json) return false;
 
-  // A SLIDER timestamp (YYYYMMDDHHMMSS) as epoch milliseconds, NaN if malformed.
-  // Used for measuring gaps only — the grid itself is built from arrival times,
-  // never from the capture time an entry carries.
-  parseSliderTimestamp: function(ts) {
-    var s = String(ts);
-    if (!/^\d{14}$/.test(s)) return NaN;
-    return Date.UTC(
-      Number(s.substring(0, 4)), Number(s.substring(4, 6)) - 1, Number(s.substring(6, 8)),
-      Number(s.substring(8, 10)), Number(s.substring(10, 12)), Number(s.substring(12, 14))
-    );
-  },
+		const id = readId(json);
+		if (!id) {
+			this.log("warn", "Register without a readable id.");
+			return false;
+		}
+		const fresh = this.lastId === null || id > this.lastId;
+		this.log("debug", `Register: ${id}${fresh ? " (new)" : " (unchanged)"}`);
+		if (!fresh) return false;
 
-  // Most frequent gap between consecutive list entries, in milliseconds.
-  // Not the minimum and not the median: single missing slots show up as double
-  // gaps and would skew both. Returns 0 when the list is too short to judge.
-  measureCadence: function(timestamps) {
-    if (!Array.isArray(timestamps) || timestamps.length < 3) return 0;
-    var counts = {};
-    var best = 0;
-    var bestCount = 0;
-    for (var i = 0; i < timestamps.length - 1; i++) {
-      var gap = this.parseSliderTimestamp(timestamps[i]) - this.parseSliderTimestamp(timestamps[i + 1]);
-      if (!(gap > 0)) continue;
-      counts[gap] = (counts[gap] || 0) + 1;
-      if (counts[gap] > bestCount) {
-        bestCount = counts[gap];
-        best = gap;
-      }
-    }
-    return best;
-  },
+		const image = await this.fetchImage(imageUrl(this.source, id));
+		if (!image) return false;
 
-  // The cadence comes from the user via sliderPollInterval; the list is only
-  // consulted to verify it. A mismatch means the configured value is wrong or
-  // the operator changed the publishing rate — either way the grid would be
-  // wrong, so sync is dropped and the module falls back to fixed polling.
-  // Runs on every successful list fetch while sync is on, which makes the
-  // error appear exactly once.
-  verifyCadence: function(timestamps) {
-    var cadence = this.measureCadence(timestamps);
-    if (cadence === 0 || cadence === this.sliderPollInterval) return;
-    this.log("ERROR", "SLIDER sync: measured cadence " + (cadence / 1000) + "s does not match"
-      + " sliderPollInterval " + (this.sliderPollInterval / 1000) + "s — sync disabled, polling at"
-      + " the configured interval. Set sliderPollInterval: " + (cadence / 1000) + " * 1000 to sync.");
-    this.syncEnabled = false;
-    this.syncOrigin = 0;
-  },
+		this.show(image, fileStamp(id));
+		this.lastId = id;
+		return true;
+	},
 
-  // Next grid point strictly after now: origin + n * cadence, n >= 1. Computed
-  // absolutely rather than by adding up delays, so timer drift, load spikes and
-  // suspend cannot accumulate.
-  scheduleSyncedPoll: function() {
-    this.rescheduleSlider(this.msToNextGridPoint());
-  },
+	/* Own URL: no register, a checksum instead of an id. */
+	async pollPlain () {
+		const image = await this.fetchImage(this.config.imageUrl);
+		if (!image) return false;
 
-  // Milliseconds until the next regular poll: the next grid point while the
-  // grid is locked, one plain interval otherwise.
-  msToNextGridPoint: function() {
-    if (!this.syncEnabled || this.syncOrigin === 0) return this.sliderPollInterval;
-    var now = Date.now();
-    var n = Math.floor((now - this.syncOrigin) / this.sliderPollInterval) + 1;
-    if (n < 1) n = 1;
-    return this.syncOrigin + n * this.sliderPollInterval - now;
-  },
+		const hash = createHash("sha1").update(image).digest("hex");
+		const fresh = hash !== this.lastId;
+		this.log("debug", `Own URL: ${hash.slice(0, 12)}${fresh ? " (new)" : " (unchanged)"}`);
+		if (!fresh) return false;
 
-  // Plan the successor of a completed poll. changed tells whether the newest
-  // list entry differs from the one seen at the previous fetch.
-  scheduleNextSliderPoll: function(changed) {
-    if (!this.syncEnabled) {
-      this.rescheduleSlider(this.sliderPollInterval);
-      return;
-    }
-    if (this.syncOrigin === 0) {
-      // Titrating: step forward until the first change shows up.
-      if (!changed) {
-        this.rescheduleSlider(this.syncDelay);
-        return;
-      }
-      this.syncOrigin = Date.now() + this.syncDelay;
-      this.log("DEBUG", "SLIDER sync: grid locked, cadence " + (this.sliderPollInterval / 1000)
-        + "s, buffer " + (this.syncDelay / 1000) + "s");
-      this.scheduleSyncedPoll();
-      return;
-    }
-    if (changed || this.syncFollowUps >= SYNC_FOLLOWUP_STEPS) {
-      // Found it, or the slot stays empty: either way on to the next grid point.
-      // The follow-ups are error handling, they never move the grid.
-      this.syncFollowUps = 0;
-      this.scheduleSyncedPoll();
-      return;
-    }
-    this.syncFollowUps++;
-    this.rescheduleSlider(this.syncDelay);
-  },
+		this.show(image, this.utcStamp(new Date()));
+		this.lastId = hash;
+		return true;
+	},
 
-  // An interface error says nothing about whether a new image exists: it costs
-  // no follow-up step and never moves the grid. Retried after retryDelay, but
-  // never later than the next regular poll — when the grid point is closer than
-  // the retry, the grid wins. Stateless on purpose: the timeout handler calls
-  // req.destroy(), which emits an additional error event, and both compute the
-  // same delay, so the single timer of rescheduleSlider absorbs the duplicate.
-  scheduleAfterSliderError: function() {
-    this.rescheduleSlider(Math.min(this.config.retryDelay, this.msToNextGridPoint()));
-  },
+	/* Determine the next run and start the cycle again then. */
+	schedule (started) {
+		const now = Date.now();
+		let next;
 
-  pollSlider: function() {
-    var self = this;
-    var satPath = this.sliderSatPath;
-    var timesUrl = SLIDER_BASE_URL + "/data/json/" + satPath + "/" + SLIDER_PRODUCT + "/latest_times.json";
+		if (!this.source) {
+			next = started + this.cadence;  // own URL: fixed interval from the start of the poll
+		} else if (this.anchor !== null) {
+			// Next grid point after the anchor that still lies ahead.
+			const k = Math.max(1, Math.floor((now - this.anchor - BUFFER) / this.cadence) + 1);
+			next = this.anchor + k * this.cadence + BUFFER;
+		} else if (now - this.since <= this.cadence + SYNC_INTERVAL) {
+			next = now + SYNC_INTERVAL;     // titration: a change is due within one cadence
+		} else {
+			next = now + this.cadence;      // source is not delivering: once per cadence
+		}
 
-    var req = https.get(timesUrl, function(res) {
-      var data = "";
-      res.on("data", function(chunk) { data += chunk; });
-      res.on("end", function() {
-        var json;
-        var ts;
-        if (res.statusCode !== 200) {
-          self.log("WARN", "SLIDER timestamp fetch failed (HTTP " + res.statusCode + ")");
-          self.scheduleAfterSliderError();
-          return;
-        }
-        try {
-          json = JSON.parse(data);
-          ts = json.timestamps_int[0].toString();
-        } catch (e) {
-          self.log("ERROR", "SLIDER JSON parse error: " + e.message);
-          self.scheduleAfterSliderError();
-          return;
-        }
-        if (self.syncEnabled) {
-          self.verifyCadence(json.timestamps_int);
-        }
+		const wait = Math.max(next - now, 1000);
+		this.log("debug", `Next poll in ${Math.round(wait / 1000)} s.`);
+		this.timer = setTimeout(() => this.tick(), wait);
+	},
 
-        // Did something new appear since the previous fetch? The very first
-        // fetch only sets the reference — when its entry showed up is unknown,
-        // so it is no event. Tracked separately from lastTimestamp so that a
-        // failed image download leaves the slot open without moving the grid.
-        var changed = false;
-        if (self.syncRefTimestamp === null) {
-          self.syncRefTimestamp = ts;
-        } else if (ts !== self.syncRefTimestamp) {
-          self.syncRefTimestamp = ts;
-          changed = true;
-        }
+	/* ---------- Image ---------- */
 
-        // Plan the next poll before the download, so the chain never depends
-        // on it finishing. The timestamp is only marked as done once the image
-        // has actually arrived — a failed download therefore leaves the slot
-        // open and the next poll fetches it again instead of skipping it.
-        self.scheduleNextSliderPoll(changed);
+	/* Take over a live image: write it atomically so the browser never reads half a file;
+	 * save a copy if enabled. Throws if writing fails. */
+	show (image, stamp) {
+		const temp = `${CURRENT}.tmp`;
+		fs.writeFileSync(temp, image);
+		fs.renameSync(temp, CURRENT);
+		this.imagePath = `${this.web}/images/current.png?t=${Date.now()}`;
+		this.log("info", `Image ${stamp} shown.`);
+		if (this.config.enableImageSaving) this.save(image, stamp);
+	},
 
-        if (ts === self.lastTimestamp) {
-          self.log("DEBUG", "SLIDER poll: no new image (latest: " + ts + ")");
-          return;
-        }
+	/* Save under the name the archive expects as well. */
+	save (image, stamp) {
+		const file = path.join(IMAGE_DIR, `${stamp}.${this.imageType(image)}`);
+		try {
+			if (fs.existsSync(file)) return;
+			fs.writeFileSync(file, image);
+			this.log("debug", `Saved: ${path.basename(file)}`);
+		} catch (error) {
+			this.log("warn", `Saving failed: ${error.message}`);
+		}
+	},
 
-        var dateStr = ts.substring(0, 4) + "/" + ts.substring(4, 6) + "/" + ts.substring(6, 8);
-        var imageUrl = SLIDER_BASE_URL + "/data/imagery/"
-          + dateStr + "/" + satPath + "---" + SLIDER_PRODUCT + "/" + ts + "/00/000_000.png";
+	archiveFiles () {
+		try {
+			return fs.readdirSync(STATIC_DIR).filter((f) => ARCHIVE_FILE.test(f));
+		} catch {
+			return [];
+		}
+	},
 
-        self.log("INFO", "New SLIDER image: " + ts);
-        self.downloadAndServe(imageUrl, "globe_" + ts + ".png", 0, function() {
-          self.lastTimestamp = ts;
-        });
-      });
-    });
-    req.on("error", function(e) {
-      self.log("ERROR", "SLIDER fetch error: " + e.message);
-      self.scheduleAfterSliderError();
-    });
-    req.setTimeout(HTTP_TIMEOUT, function() {
-      req.destroy();
-      self.log("WARN", "SLIDER timestamp fetch timeout");
-      self.scheduleAfterSliderError();
-    });
-  },
+	/* Archive image: the file whose day phase at the location is closest to the current
+	 * one. Sunrise meets sunrise, noon meets noon and night meets night, even if the
+	 * archive comes from another season. null without archive images. */
+	archiveImage () {
+		const files = this.archiveFiles();
+		if (!files.length) return null;
 
-  // --- Static URL polling (all styles except meteosat, including ownImagePath) ---
+		// Without sunrise or sunset today (polar regions), UTC time of day applies to all.
+		const now = Date.now();
+		const polar = this.phase(now) === null;
+		const key = (time) => (polar ? null : this.phase(time)) ?? 2 * (time % DAY) / DAY;
+		const ref = key(now);
 
-  pollStatic: function() {
-    var self = this;
-    var sep = this.staticUrl.indexOf("?") === -1 ? "?" : "&";
-    var imageUrl = this.staticUrl + sep + "t=" + Date.now();
+		let best = null;
+		let bestDiff = Infinity;
+		for (const file of files) {
+			const diff = Math.abs(key(this.stampDate(file).getTime()) - ref);
+			const circular = Math.min(diff, 2 - diff);
+			if (circular < bestDiff) {
+				bestDiff = circular;
+				best = file;
+			}
+		}
+		this.log("debug", `Archive image: ${best}`);
+		return `${this.web}/static/${best}`;
+	},
 
-    self.log("DEBUG", "Fetching image...");
-    self.downloadAndServe(imageUrl);
+	/* Day phase at the location: 0 to 1 from sunrise to sunset, 1 to 2 through the night
+	 * to the next sunrise. null without sunrise or sunset. */
+	phase (time) {
+		const times = (t) => SunCalc.getTimes(new Date(t), this.config.lat, this.config.lon);
+		const { sunrise, sunset } = times(time);
+		const rise = sunrise.getTime();
+		const set = sunset.getTime();
+		let phase;
+		if (time < rise) {
+			const before = times(time - DAY).sunset.getTime();
+			phase = 1 + (time - before) / (rise - before);
+		} else if (time > set) {
+			const after = times(time + DAY).sunrise.getTime();
+			phase = 1 + (time - set) / (after - set);
+		} else {
+			phase = (time - rise) / (set - rise);
+		}
+		return Number.isFinite(phase) && phase >= 0 && phase <= 2 ? phase : null;
+	},
 
-    setTimeout(function() { self.pollStatic(); }, self.config.updateInterval);
-  },
+	/* ---------- Payload ---------- */
 
-  // --- Download image, write current.png for frontend, optionally save copy ---
-  // Always downloads the image and serves it via current.png.
-  // When enableImageSaving is true, also saves a timestamped copy.
-  //
-  // filename provided (SLIDER): save with that name, dedup by file existence.
-  // filename omitted (static):  generate timestamped name, dedup by content hash.
+	/* Live image while the source delivers; otherwise an archive image. Only sent if it
+	 * differs from the last payload. */
+	send () {
+		// Six missed publications; the half cadence absorbs the duration of the poll.
+		const stale = Date.now() - this.since > (STALE_LIMIT - 0.5) * this.cadence;
+		if (stale !== this.stale) {
+			if (stale) this.log("warn", `No new image for ${STALE_LIMIT} publications.`);
+			else this.log("info", "Live image current again.");
+			this.stale = stale;
+		}
 
-  // onSuccess (optional) is called exactly once, and only when the image has been
-  // written and handed to the frontend. Every other outcome — validation failure,
-  // exhausted retries, screen off, HTTP error, socket error, timeout, unwritable
-  // file — stays silent by design, so the SLIDER caller does not mark the slot as
-  // done and fetches it again on the next poll. pollStatic passes no callback and
-  // is unaffected.
-  downloadAndServe: function(imageUrl, filename, retryAttempt, onSuccess) {
-    var self = this;
-    if (typeof retryAttempt !== "number") retryAttempt = 0;
-    var saveDir = this.ensureImagesDir();
-    var currentFile = path.join(saveDir, "current.png");
+		const archive = stale && this.config.switchToStaticIfStale ? this.archiveImage() : null;
+		const url = archive || this.imagePath;
+		if (!url) return;
 
-    var client = imageUrl.startsWith("https") ? https : http;
-    var req = client.get(imageUrl, function(res) {
-      if (res.statusCode === 200) {
-        // Stale detection via Last-Modified header (only for static styles)
-        var staleHandledByHeader = false;
-        if (!filename && self.config.switchToStaticIfStale) {
-          var lastModified = res.headers["last-modified"];
-          if (lastModified) {
-            var imageAge = Date.now() - new Date(lastModified).getTime();
-            if (imageAge > STALE_THRESHOLD_MS) {
-              self.log("DEBUG", "Image stale (Last-Modified: " + lastModified + ", age: " + Math.round(imageAge / 60000) + "min)");
-              res.resume(); // Drain response to free socket
-              self.serveStaticFallback();
-              return;
-            } else if (self.staleFallbackActive) {
-              self.log("INFO", "Live image recovered, resuming normal operation");
-              self.staleFallbackActive = false;
-              self.staleCount = 0;
-            }
-            staleHandledByHeader = true;
-          }
-        }
+		const payload = {
+			url,
+			// Archive images carry their lines in the image already.
+			overlay: !archive && this.config.coastlines ? `${this.web}/coastlines_${this.config.coastlines}.png` : null,
+			marker: archive ? this.config.marker : null
+		};
+		if (this.payload && JSON.stringify(payload) === JSON.stringify(this.payload)) return;
 
-        var chunks = [];
-        res.on("data", function(chunk) { chunks.push(chunk); });
-        res.on("end", function() {
-          var buffer = Buffer.concat(chunks);
+		this.payload = payload;
+		this.sendSocketNotification("GLOBE_IMAGE", payload);
+	},
 
-          if (!isValidImageBuffer(buffer)) {
-            var preview = buffer.toString("hex", 0, Math.min(16, buffer.length));
-            self.log("DEBUG",
-              "Validation failed for " + imageUrl
-              + " (size: " + buffer.length + " bytes, first 16 hex: " + preview + ")");
-            self.retryImage(imageUrl, filename, retryAttempt, onSuccess);
-            return;
-          }
+	/* ---------- Fetch ---------- */
 
-          // Compute content hash for static paths (used for dedup and hash-based stale detection)
-          var hash = null;
-          if (!filename) {
-            hash = crypto.createHash("md5").update(buffer).digest("hex").substring(0, 12);
-          }
+	async fetchJson (url) {
+		const body = await this.fetch(url, false);
+		if (!body) return null;
+		try {
+			return JSON.parse(body.toString("utf8"));
+		} catch (error) {
+			this.log("warn", `Register unreadable: ${error.message}`);
+			return null;
+		}
+	},
 
-          // Hash-based stale detection (fallback when no Last-Modified header)
-          if (hash && self.config.switchToStaticIfStale && !staleHandledByHeader) {
-            if (hash === self.lastImageHash) {
-              self.staleCount = Math.min(self.staleCount + 1, STALE_HASH_COUNT);
-              if (self.staleCount >= STALE_HASH_COUNT) {
-                self.log("DEBUG", "Image stale (hash unchanged for " + self.staleCount + " polls)");
-                self.serveStaticFallback();
-                return;
-              }
-            } else {
-              if (self.staleFallbackActive) {
-                self.log("INFO", "Live image recovered, resuming normal operation");
-                self.staleFallbackActive = false;
-              }
-              self.staleCount = 0;
-            }
-          }
+	async fetchImage (url) {
+		return this.fetch(url, true);
+	},
 
-          // Save timestamped copy (only when enableImageSaving is on)
-          if (self.config.enableImageSaving) {
-            if (filename) {
-              // SLIDER path: dedup by filename (timestamp-based)
-              if (!fs.existsSync(path.join(saveDir, filename))) {
-                fs.writeFile(path.join(saveDir, filename), buffer, function(err) {
-                  if (err) {
-                    self.log("ERROR", "Image save error: " + err.message);
-                  } else {
-                    self.log("INFO", "Image saved: " + filename);
-                  }
-                });
-              } else {
-                self.log("DEBUG", "Image already saved: " + filename);
-              }
-            } else if (hash !== self.lastImageHash) {
-              // Static path: dedup by content hash (hash already computed above)
-              self.log("INFO", "New image (hash " + hash + ")");
-              var now = new Date();
-              var ts = now.getFullYear()
-                + ("0" + (now.getMonth() + 1)).slice(-2)
-                + ("0" + now.getDate()).slice(-2)
-                + ("0" + now.getHours()).slice(-2)
-                + ("0" + now.getMinutes()).slice(-2)
-                + ("0" + now.getSeconds()).slice(-2);
-              var saveName = "globe_" + ts + self.getImageExtension(imageUrl);
-              fs.writeFile(path.join(saveDir, saveName), buffer, function(err) {
-                if (err) {
-                  self.log("ERROR", "Image save error: " + err.message);
-                } else {
-                  self.log("INFO", "Image saved: " + saveName);
-                }
-              });
-            } else {
-              self.log("DEBUG", "Image unchanged (hash " + hash + ")");
-            }
-          }
+	/* Three attempts, timeout per attempt. With image, a response without image data
+	 * (an error page with HTTP 200) counts as a failed attempt. Returns the body or null.
+	 * A failed fetch is a gap in the source, not an error of the module. */
+	async fetch (url, image) {
+		for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+			try {
+				const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT) });
+				if (!response.ok) throw new Error(`HTTP ${response.status}`);
+				const body = Buffer.from(await response.arrayBuffer());
+				if (image && !this.imageType(body)) throw new Error(`no image data (${body.length} bytes)`);
+				return body;
+			} catch (error) {
+				// For network errors message only says "fetch failed"; the reason is in cause.
+				const reason = error.cause ? `${error.message} (${error.cause.code || error.cause.message})` : error.message;
+				if (attempt === ATTEMPTS) {
+					this.log("warn", `Fetch failed after ${ATTEMPTS} attempts: ${reason} — ${url}`);
+					return null;
+				}
+				this.log("debug", `Fetch failed (${attempt}/${ATTEMPTS}): ${reason}`);
+				await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
+			}
+		}
+		return null;
+	},
 
-          // Update lastImageHash after dedup check
-          if (hash) {
-            self.lastImageHash = hash;
-          }
+	/* Magic bytes instead of a minimum size: also detects an error page with HTTP 200.
+	 * Returns the file extension or null. */
+	imageType (body) {
+		if (body.length < 8) return null;
+		if (body.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "png";
+		if (body[0] === 0xff && body[1] === 0xd8) return "jpg";
+		if (body.subarray(0, 3).toString("latin1") === "GIF") return "gif";
+		return null;
+	},
 
-          // Write current.png and send local path to frontend
-          fs.writeFile(currentFile, buffer, function(err) {
-            if (err) {
-              self.log("ERROR", "Failed to write current.png: " + err.message);
-            } else {
-              self.sendSocketNotification("IMAGE_READY", {
-                url: "/modules/MMM-Globe/images/current.png?t=" + Date.now(),
-                isFallback: false,
-                fallbackText: null
-              });
-              if (typeof onSuccess === "function") {
-                onSuccess();
-              }
-            }
-          });
-        });
-      } else {
-        self.log("WARN", "Image fetch failed (HTTP " + res.statusCode + ")");
-        res.resume(); // Drain response to free socket
-        self.retryImage(imageUrl, filename, retryAttempt, onSuccess);
-      }
-    });
-    req.on("error", function(e) {
-      self.log("ERROR", "Image fetch error: " + e.message);
-      self.retryImage(imageUrl, filename, retryAttempt, onSuccess);
-    });
-    req.setTimeout(HTTP_TIMEOUT_IMAGE, function() {
-      req.destroy();
-      self.log("WARN", "Image fetch timeout");
-      self.retryImage(imageUrl, filename, retryAttempt, onSuccess);
-    });
-  },
+	/* ---------- Small helpers ---------- */
 
-  // Retry chain for a failed image download: 30s, then 90s, then give up and
-  // leave the slot to the next poll. Suppressed while the screen is off (PSC).
-  // Used for every kind of failure — invalid content as well as HTTP, socket
-  // and timeout errors; before v3.5.0 only invalid content was retried, which
-  // cost a whole slot once the poll interval grew beyond a minute.
-  retryImage: function(imageUrl, filename, retryAttempt, onSuccess) {
-    var self = this;
-    if (!this.screenOn) {
-      this.log("DEBUG", "Skipping retry: screen off");
-      return;
-    }
-    if (retryAttempt >= RETRY_MAX) {
-      this.log("WARN", "Failed to get valid image from " + imageUrl
-        + " after " + RETRY_MAX + " retries");
-      return;
-    }
-    var delay = RETRY_DELAYS_MS[retryAttempt];
-    this.log("DEBUG", "Retrying in " + (delay / 1000) + "s (" + (retryAttempt + 1) + "/" + RETRY_MAX + ")");
-    setTimeout(function() {
-      self.downloadAndServe(imageUrl, filename, retryAttempt + 1, onSuccess);
-    }, delay);
-  },
+	utcStamp (date) {
+		return date.toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
+	},
 
-  // Determine file extension from URL (supports both direct URLs and WMS format= parameter)
-  getImageExtension: function(url) {
-    var wmsFormat = url.match(/format=image\/(png|jpeg|gif)/i);
-    if (wmsFormat) {
-      return wmsFormat[1].toLowerCase() === "jpeg" ? ".jpg" : "." + wmsFormat[1].toLowerCase();
-    }
-    var directExt = url.match(/\.(png|jpg|jpeg|gif)/i);
-    if (directExt) {
-      return directExt[0].toLowerCase() === ".jpeg" ? ".jpg" : directExt[0].toLowerCase();
-    }
-    return ".png";
-  }
+	stampDate (file) {
+		return new Date(Date.UTC(
+			Number(file.slice(0, 4)), Number(file.slice(4, 6)) - 1, Number(file.slice(6, 8)),
+			Number(file.slice(9, 11)), Number(file.slice(11, 13))
+		));
+	},
+
+	/* MagicMirror prefixes every line with the module name itself. One console method per
+	 * level, so that the mirror's label applies and errors go to stderr. */
+	log (level, message) {
+		if (LEVELS.indexOf(level) <= LEVELS.indexOf(this.config.logLevel)) {
+			console[level](message);
+		}
+	}
 });

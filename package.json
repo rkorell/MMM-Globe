@@ -1,7 +1,7 @@
 {
   "name": "mmm-globe",
-  "version": "3.5.0",
-  "description": "MagicMirror module for displaying satellite imagery from various geostationary satellites",
+  "version": "4.0.0",
+  "description": "MagicMirror module showing a current satellite image of the Earth as a round disc",
   "main": "MMM-Globe.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -28,6 +28,9 @@
     "url": "https://github.com/rkorell/MMM-Globe/issues"
   },
   "homepage": "https://github.com/rkorell/MMM-Globe#readme",
+  "dependencies": {
+    "suncalc": "^1.9.0"
+  },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
     "eslint": "^9.0.0",

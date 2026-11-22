@@ -3,6 +3,28 @@
 What changed compared to the original module, newest first. This history was part of
 `README.md` until it moved here; the entries themselves are unchanged.
 
+## v4.0.0 — Rewrite (Nov 2026)
+
+**Breaking change.** The configuration changes; v4 recognises a v3 configuration, shows a
+notice instead of the globe and writes a complete v4 entry to `new_globe_config.js`. See
+[Upgrading from v3](README.md#upgrading-from-v3). To stay on v3: `git checkout v3.5.0`.
+
+- **Four styles** `europe`, `americas`, `pacific`, `asia` from CIRA SLIDER. The frozen
+  Himawari-8, the broken GOES-16 and the discontinued EUMETSAT styles are gone.
+- **Own image source** via `imageUrl` with `style: ""`, polled at a fixed `updateInterval`,
+  change detected by checksum. Default is the EUMETSAT WMS.
+- **Publication rhythm found automatically**: the module observes one change and then polls
+  once per cadence, one minute after the expected change. `sliderPollInterval`,
+  `syncDelay` and `retryDelay` are gone.
+- **Archive mode** after six missed publications, for styles and own URL alike. The archive
+  image is chosen by day phase at the location (sunrise to sunrise, any season);
+  `archiveSunPhase` is gone. Archive files are named `YYYYMMDD-HHMM`, like saved images.
+- **Dot marker** drawn by the browser; Python and Pillow are no longer needed.
+- **Fetch errors**: three attempts ten seconds apart, the cause in the log; a failed image
+  leaves a gap, the next one comes on time.
+- **No flicker**: the old image stays until the new one has loaded.
+- **New dependency** `suncalc`, declared in `package.json`.
+
 ## v3.5.0 — Sync to the publication grid (Oct 2026)
 
 - **New `syncDelay` parameter**: Locks the SLIDER polls onto the publication grid of the service. The module titrates the unknown phase in `syncDelay` steps, takes the first observed change plus `syncDelay` as the grid origin and then polls once per slot. The image reaches the mirror one to two `syncDelay` after publication, at one list request and one image per slot instead of one request per minute. Off by default. See [Synchronising to the publication grid](README.md#synchronising-to-the-publication-grid).

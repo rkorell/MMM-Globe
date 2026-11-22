@@ -1,44 +1,61 @@
-/* Default image styles (no coastline underlay) */
-.MMM-Globe-image {
-	clip-path: circle(50% at 50% 50%);
-}
-.MMM-Globe-image-centralAmericaDiscNat {
-	clip-path: circle(44% at 50% 50%);
-}
+/* MMM-Globe — Styles
+ *
+ * The satellite image lies above the coastline drawing and is blended with "lighten":
+ * where the image is bright, the image wins; where it is dark, the lines show through.
+ * That is why the overlay files are bright lines on a black ground.
+ *
+ * Modified: [2026-11-02 21:17] - Created
+ * Modified: [2026-11-11 14:38] - Taken over into MMM-Globus-Neu2
+ * Modified: [2026-11-11 16:09] - Coastline offset from MMM-Globe, relative to the image
+ *                                height
+ * Modified: [2026-11-12 11:01] - All comments in English
+ * Modified: [2026-11-22 11:05] - v3 transition: notice image
+ */
 
-/* Container for satellite image + coastline underlay stack */
-.MMM-Globe-container {
+.mmm-globe .globe {
 	position: relative;
-	display: inline-block;
+	overflow: hidden;
+	/* Fixed width — without this the globe sits at the left edge of the region. */
+	margin: 0 auto;
+	/* Fixed ground, so that "lighten" has a defined result even without an overlay. */
+	background: #000;
 }
 
-/* Coastline underlay: visible only where satellite image is dark (night side) */
-.MMM-Globe-coastlines {
+.mmm-globe .globe img {
 	position: absolute;
 	top: 0;
 	left: 0;
-	clip-path: circle(50% at 50% 50%);
+	width: 100%;
+	height: 100%;
+}
+
+.mmm-globe .coastlines {
+	/* The lines in the files are white; at 30 % they become a dark grey over black. */
 	opacity: 0.3;
-	/* Calibrated for MSG rgb_naturalenhncd 600x600 displayed at imageSize:750 */
-	transform: translate(0, -10px) scale(0.958);
-	transform-origin: center center;
+	/* Calibrated in v3 for the WMS default (600 x 600) at 750 px display: 10 px up and
+	 * factor 0.958. The offset is given relative to the image height here (10 / 750),
+	 * so it fits any imageSize. */
+	transform: translate(0, -1.333%) scale(0.958);
 }
 
-/* Satellite image with blend mode (used when coastlines are active) */
-.MMM-Globe-image-blended {
-	position: relative;
-	clip-path: circle(50% at 50% 50%);
-	mix-blend-mode: lighten;
-}
-.MMM-Globe-image-centralAmericaDiscNat-blended {
-	position: relative;
-	clip-path: circle(44% at 50% 50%);
+.mmm-globe .satellite {
 	mix-blend-mode: lighten;
 }
 
-/* Text label for stale fallback mode */
-.MMM-Globe-fallback-text {
+.mmm-globe .marker-dot {
+	position: absolute;
+	border-radius: 50%;
+	transform: translate(-50%, -50%);
+}
+
+.mmm-globe .marker-text {
 	text-align: center;
-	font-size: 12px;
-	margin-top: 4px;
+	font-size: 0.8em;
+	opacity: 0.6;
+}
+
+/* v3 transition: notice image instead of the globe. */
+.mmm-globe .notice {
+	display: block;
+	margin: 0 auto;
 }
