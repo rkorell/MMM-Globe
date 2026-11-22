@@ -217,7 +217,7 @@ Four pre-rendered PNG overlays are included, each in the geostationary projectio
 
 The underlay uses CSS `mix-blend-mode: lighten`, which means the coastlines are only visible where the satellite image is dark (night side or black background). On the bright day side, the satellite image dominates completely. This creates a natural effect where borders fade in as the Earth rotates into night.
 
-The alignment is calibrated for the default WMS image (600×600) and scales with `imageSize`, so it fits at any size.
+The alignment is calibrated for the WMS image from [Using EUMETSAT WMS](#using-eumetsat-wms) (600×600) and scales with `imageSize`, so it fits at any size.
 
 The coastline data comes from Natural Earth (`ne_10m_coastline` + `ne_boundary_lines_land`) via the EUMETSAT WMS background layers.
 
