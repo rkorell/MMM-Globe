@@ -91,25 +91,38 @@ config: {
 }
 ```
 
-Full configuration with all options:
+Full configuration with a style — every option that applies, with its default:
 
 ```js
 {
     module: "MMM-Globe",
     position: "lower_third",
     config: {
-        style: "europe",                   // europe, americas, pacific, asia — or "" for imageUrl
-        imageUrl: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",  // own image URL, used with style: ""
-        updateInterval: 15 * 60 * 1000,    // poll interval of the own URL (15 min)
+        style: "europe",                   // europe, americas, pacific, asia
         imageSize: 600,                    // display size in pixels
         clipRadius: 48.55,                 // radius of the circular clip in percent; null = no clip
-        coastlines: false,                 // coastline underlay for the own URL: europe, americas, pacific, asia
         switchToStaticIfStale: false,      // show archive images when the live feed goes stale
         staleFallbackMarker: "off",        // "off", "X:Y:Px:Color", or a text label
         lat: 52.52,                        // mirror location, for the day phase of archive images
         lon: 13.405,
         enableImageSaving: false,          // save every live image to images/
         logLevel: "info"                   // error, warn, info, debug
+    }
+},
+```
+
+Full configuration with your own image URL — here the EUMETSAT WMS; the options of the first example apply as well:
+
+```js
+{
+    module: "MMM-Globe",
+    position: "lower_third",
+    config: {
+        style: "",                         // "" = use imageUrl
+        imageUrl: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",
+        updateInterval: 15 * 60 * 1000,    // poll interval of the URL (15 min)
+        coastlines: "europe",              // coastline underlay: europe, americas, pacific, asia, or false
+        imageSize: 600
     }
 },
 ```
@@ -159,7 +172,7 @@ So the module finds the phase instead of guessing it. For `style: "europe"` it l
 
 A new image thus reaches the mirror at most two minutes after its publication, at one request per image.
 
-If a publication is missing — that happens, always as a single slot — the module notes a gap and the next image comes on time; a missing image is never delivered afterwards, so there is nothing to chase. After a longer outage, when [archive mode](#archive-mode) has kicked in, the source may come back on a different schedule, so the module finds the phase again.
+If a publication is missing — that happens, always as a single slot — the module notes a gap and the next image comes on time; a missing image is never delivered afterwards, so there is nothing to chase. After a longer outage — six missed publications in a row — the source may come back on a different schedule, so the module finds the phase again.
 
 Your own URL works differently: the module knows nothing about it and doesn't try to. It fetches the image every `updateInterval`, counted from the start, and detects by a checksum whether it changed. A new image therefore appears up to one interval after its publication.
 
@@ -179,7 +192,7 @@ config: {
 
 The key parameter is `CRS=AUTO:42003,9001,{longitude},0` — this geostationary projection centered on the satellite's longitude produces a round Earth disc. `BGCOLOR=0x000000` gives a black background.
 
-**Footer bar:** Some EUMETSAT WMS layers and sizes carry a footer bar (logo + timestamp) at the bottom. The default `clipRadius: 48.55` crops it away, and that works on any mirror background, not just black. Thanks to [@Muffexx](https://github.com/Muffexx) for the idea ([#1](https://github.com/rkorell/MMM-Globe/issues/1)).
+**Footer bar:** Some EUMETSAT WMS layers and sizes carry a footer bar (logo + timestamp) at the bottom. A `clipRadius` below 50, such as `48.55`, crops it away, and that works on any mirror background, not just black. Thanks to [@Muffexx](https://github.com/Muffexx) for the idea ([#1](https://github.com/rkorell/MMM-Globe/issues/1)).
 
 Some useful WMS layers:
 
@@ -197,10 +210,10 @@ The `coastlines` option adds a subtle underlay of coastlines and country borders
 
 Four pre-rendered PNG overlays are included, each in the geostationary projection of one satellite view:
 
-- `"europe"` — centered at 0° longitude (Meteosat perspective)
-- `"americas"` — centered at -75.2° longitude (GOES perspective)
-- `"pacific"` — for the GOES-18 perspective
-- `"asia"` — centered at 140.7° longitude (Himawari perspective)
+- `"europe"` — Meteosat perspective
+- `"americas"` — GOES-19 perspective
+- `"pacific"` — GOES-18 perspective
+- `"asia"` — Himawari perspective
 
 The underlay uses CSS `mix-blend-mode: lighten`, which means the coastlines are only visible where the satellite image is dark (night side or black background). On the bright day side, the satellite image dominates completely. This creates a natural effect where borders fade in as the Earth rotates into night.
 
@@ -210,7 +223,7 @@ The coastline data comes from Natural Earth (`ne_10m_coastline` + `ne_boundary_l
 
 ## Archive mode
 
-Satellite services have bad days — EUMETSAT's processing once stood still for more than 30 hours. Without help, the mirror would show the same frozen image all that time. Archive mode shows pre-recorded images instead, matched to the current time of day, and switches back as soon as the live feed recovers — no manual intervention needed.
+Satellite services have bad days, sometimes lasting many hours. Without help, the mirror would show the same frozen image all that time. Archive mode shows pre-recorded images instead, matched to the current time of day, and switches back as soon as the live feed recovers — no manual intervention needed.
 
 ### Enabling it
 
@@ -218,7 +231,6 @@ Satellite services have bad days — EUMETSAT's processing once stood still for 
 config: {
     style: "europe",
     switchToStaticIfStale: true,
-    staleFallbackMarker: "330:75:4:cornflowerblue",
     lat: 52.52,
     lon: 13.405
 }
@@ -252,10 +264,10 @@ An optional visual marker indicates that the module is showing archive images in
 **Dot marker** — a small colored dot at a specific pixel position on the archive image, drawn by the browser:
 
 ```js
-// Subtle blue dot on Germany
+// Subtle blue dot on Germany (on 600×600 WMS archive images)
 staleFallbackMarker: "330:75:4:cornflowerblue"
 
-// Larger red dot on Italy
+// Larger red dot on Italy (on 600×600 WMS archive images)
 staleFallbackMarker: "340:130:8:red"
 
 // Format: "X:Y:Px:Color" — position, size, color
@@ -306,14 +318,14 @@ What changed:
 | `geoColorEurope`, `meteosat` / `geoColorUSA` / `geoColorPacific` / `geoColorAsia` | `europe` / `americas` / `pacific` / `asia` |
 | `geoColor`, `natColor`, `airMass`, `fullBand` (Himawari-8) | removed — frozen since 2021; `asia` shows the same region live |
 | `centralAmericaDiscNat` (GOES-16) | removed — broken; `americas` shows the same region live |
-| `europeDiscNat`, `europeDiscSnow` (EUMETSAT) | removed — discontinued; use `style: ""` with the default WMS |
+| `europeDiscNat`, `europeDiscSnow` (EUMETSAT) | removed — discontinued; use `style: ""` with the EUMETSAT WMS URL, see [Using EUMETSAT WMS](#using-eumetsat-wms) |
 | `ownImagePath` | `imageUrl` together with `style: ""` |
 | `sliderPollInterval`, `syncDelay`, `retryDelay` | removed — the module finds the publication rhythm itself |
 | `archiveSunPhase` | removed — the day phase comes from the date of each archive image |
 | `clipRadius: null` = default of the style | `null` = no clip; default `48.55` |
 | Default marker: dot; default `logLevel`: `"ERROR"` | `"off"`; `"info"` |
 | Dot marker drawn with Python/Pillow | drawn by the browser, no Python needed |
-| Retries paused while MMM-PresenceScreenControl reports the screen off | removed — retries take at most 20 seconds |
+| Retries paused while MMM-PresenceScreenControl reports the screen off | removed — a failed fetch is retried only twice, ten seconds apart |
 
 **Your archive:** v3 archive images are named by time only (`HHMM.jpg`); v4 needs the date as well (`YYYYMMDD-HHMM.jpg`) to match day and night, and does not use the old ones. Only you know when you took them, so the module can't rename them for you — rename them yourself with their capture date, or build a new archive with `enableImageSaving`. If your archive is enabled, both `new_globe_config.js` and the log tell you what they found. The v3 example `static/1200.jpg` stays in the repository, so that your own 12:00 image in its place does not block `git pull`.
 
