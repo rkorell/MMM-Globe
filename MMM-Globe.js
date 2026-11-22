@@ -17,6 +17,7 @@
  * Modified: [2026-11-22 11:05] - v3 transition: sends the module data as written in
  *                                config.js, shows the notice image instead of the globe
  * Modified: [2026-11-22 12:07] - switchToStaticIfStale default false: no archive is shipped
+ * Modified: [2026-11-22 14:17] - clipRadius default null = 50, the inscribed circle, as in v3
  */
 
 Module.register("MMM-Globe", {
@@ -28,7 +29,7 @@ Module.register("MMM-Globe", {
 			+ "&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",
 		updateInterval: 15 * 60 * 1000,
 		imageSize: 600,
-		clipRadius: 48.55,
+		clipRadius: null,
 		coastlines: false,
 		switchToStaticIfStale: false,
 		staleFallbackMarker: "off",
@@ -75,7 +76,8 @@ Module.register("MMM-Globe", {
 
 		globe.style.width = `${imageSize}px`;
 		globe.style.height = `${imageSize}px`;
-		globe.style.clipPath = clipRadius === null ? "" : `circle(${clipRadius}% at 50% 50%)`;
+		// null: the inscribed circle.
+		globe.style.clipPath = `circle(${clipRadius ?? 50}% at 50% 50%)`;
 
 		lines.style.display = payload.overlay ? "" : "none";
 		if (payload.overlay) this.setSource(lines, payload.overlay);

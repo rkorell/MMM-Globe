@@ -100,7 +100,7 @@ Full configuration with a style — every option that applies, with its default:
     config: {
         style: "europe",                   // europe, americas, pacific, asia
         imageSize: 600,                    // display size in pixels
-        clipRadius: 48.55,                 // radius of the circular clip in percent; null = no clip
+        clipRadius: null,                  // radius of the circular clip in percent; null = 50
         switchToStaticIfStale: false,      // show archive images when the live feed goes stale
         staleFallbackMarker: "off",        // "off", "X:Y:Px:Color", or a text label
         lat: 52.52,                        // mirror location, for the day phase of archive images
@@ -122,7 +122,7 @@ Full configuration with your own image URL — here the EUMETSAT WMS — with ev
         imageUrl: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",
         updateInterval: 15 * 60 * 1000,    // poll interval of the URL (15 min)
         imageSize: 600,                    // display size in pixels
-        clipRadius: 48.55,                 // radius of the circular clip in percent; null = no clip
+        clipRadius: 48.55,                 // radius of the circular clip in percent; crops the WMS footer
         coastlines: "europe",              // coastline underlay: europe, americas, pacific, asia, or false
         switchToStaticIfStale: false,      // show archive images when the live feed goes stale
         staleFallbackMarker: "off",        // "off", "X:Y:Px:Color", or a text label
@@ -142,7 +142,7 @@ Full configuration with your own image URL — here the EUMETSAT WMS — with ev
 | `imageUrl` | URL of your own image source, used when `style` is `""`. Works with any image URL; the default is the EUMETSAT WMS (see [below](#using-eumetsat-wms)).<br>**Type:** `string` **Default:** EUMETSAT WMS, `msg_fes:rgb_naturalenhncd`, 600×600 |
 | `updateInterval` | How often the own URL is fetched (in milliseconds). Not used for the SLIDER styles, which find their rhythm themselves (see [How new images are found](#how-new-images-are-found)). Values below 5 minutes are raised to 5 minutes; an unreadable value falls back to the default, both with a log line.<br>**Type:** `integer` **Default:** `15 * 60 * 1000` (15 minutes) |
 | `imageSize` | Size of the displayed globe in pixels.<br>**Type:** `integer` **Default:** `600` |
-| `clipRadius` | Radius of the circular clip in percent of the image size. 50 is the inscribed circle; a smaller value crops away an unwanted border or footer on **any** background. `null` turns the clip off.<br>**Type:** `number` (or `null`) **Default:** `48.55` |
+| `clipRadius` | Radius of the circular clip in percent of the image size. 50 is the inscribed circle; a smaller value crops away an unwanted border or footer on **any** background. `null` is the inscribed circle, 50. For the EUMETSAT WMS, `48.55` crops the footer some of its layers carry.<br>**Type:** `number` (or `null`) **Default:** `null` |
 | `coastlines` | Show a coastline and country border underlay beneath the satellite image. **Only applies to your own URL** — the SLIDER styles don't need it, and with a style set the module ignores it with a log line. See [Coastline underlay](#coastline-underlay).<br>**Values:** `false` (off), `"europe"`, `"americas"`, `"pacific"`, `"asia"` **Default:** `false` |
 | `switchToStaticIfStale` | When `true`, the module switches to archive images from `static/` once the live feed stops delivering, and back when it recovers. Needs archive images of your own; see [Archive mode](#archive-mode).<br>**Type:** `boolean` **Default:** `false` |
 | `staleFallbackMarker` | Visual marker to indicate archive mode. See [Fallback marker](#fallback-marker) for the three formats.<br>**Type:** `string` **Default:** `"off"` |
@@ -193,13 +193,14 @@ config: {
     imageUrl: "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:rgb_naturalenhncd&bbox=-6500000,-6500000,6500000,6500000&width=600&height=600&CRS=AUTO:42003,9001,0,0&styles=&format=image/png&BGCOLOR=0x000000",
     imageSize: 600,
     updateInterval: 15 * 60 * 1000,
+    clipRadius: 48.55,
     coastlines: "europe"
 }
 ```
 
 The key parameter is `CRS=AUTO:42003,9001,{longitude},0` — this geostationary projection centered on the satellite's longitude produces a round Earth disc. `BGCOLOR=0x000000` gives a black background.
 
-**Footer bar:** Some EUMETSAT WMS layers and sizes carry a footer bar (logo + timestamp) at the bottom. A `clipRadius` below 50, such as `48.55`, crops it away, and that works on any mirror background, not just black. Thanks to [@Muffexx](https://github.com/Muffexx) for the idea ([#1](https://github.com/rkorell/MMM-Globe/issues/1)).
+**Footer bar:** Some EUMETSAT WMS layers and sizes carry a footer bar (logo + timestamp) at the bottom. `clipRadius: 48.55` crops it away, and that works on any mirror background, not just black. Thanks to [@Muffexx](https://github.com/Muffexx) for the idea ([#1](https://github.com/rkorell/MMM-Globe/issues/1)).
 
 Some useful WMS layers:
 
@@ -329,7 +330,6 @@ What changed:
 | `ownImagePath` | `imageUrl` together with `style: ""` |
 | `sliderPollInterval`, `syncDelay`, `retryDelay` | removed — the module finds the publication rhythm itself |
 | `archiveSunPhase` | removed — the day phase comes from the date of each archive image |
-| `clipRadius: null` = default of the style | `null` = no clip; default `48.55` |
 | Default marker: dot; default `logLevel`: `"ERROR"` | `"off"`; `"info"` |
 | Dot marker drawn with Python/Pillow | drawn by the browser, no Python needed |
 | Retries paused while MMM-PresenceScreenControl reports the screen off | removed — a failed fetch is retried only twice, ten seconds apart |

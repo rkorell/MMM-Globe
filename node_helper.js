@@ -44,6 +44,7 @@
  * Modified: [2026-11-22 11:57] - The v3 transition logs the archive check as well
  * Modified: [2026-11-22 12:07] - switchToStaticIfStale default false, as in v3
  * Modified: [2026-11-22 12:11] - new_globe_config.js removed after the first valid v4 start
+ * Modified: [2026-11-22 14:17] - v3 transition: clipRadius null means the same as in v3 again
  */
 
 const NodeHelper = require("node_helper");
@@ -83,7 +84,7 @@ const V3_STYLES = {
 const V3_SLIDER = ["geoColorEurope", "meteosat", "geoColorUSA", "geoColorPacific", "geoColorAsia"];  // ignored ownImagePath
 const V3_REMOVED = ["sliderPollInterval", "syncDelay", "retryDelay", "archiveSunPhase", "ownImagePath"];
 const V3_DEFAULTS = {  // where they differ from v4
-	updateInterval: "10 min", clipRadius: "null, i.e. 50 %",
+	updateInterval: "10 min",
 	staleFallbackMarker: "\"330:75:4:cornflowerblue\"", logLevel: "\"ERROR\""
 };
 const V3_EXAMPLE = "773ba5d25b3c8e3537e52d7cb8c06a00e66f2434";  // sha1 of the shipped static/1200.jpg
@@ -243,10 +244,6 @@ module.exports = NodeHelper.create({
 		} else {
 			comment.style = `CHECK — your value "${old}" is unknown, v4 default`;
 			value.style = defaults.style;
-		}
-		if (raw.clipRadius === null) {
-			value.clipRadius = defaults.clipRadius;
-			comment.clipRadius = "CHECK — your v3 value null now means \"no clipping\"; v4 default";
 		}
 		if (value.style && raw.coastlines) comment.coastlines = "CHECK — applies only with style \"\" (own URL)";
 
